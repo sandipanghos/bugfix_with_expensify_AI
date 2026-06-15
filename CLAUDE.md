@@ -14,40 +14,90 @@ No webhooks, no Redis, no job queues. Runs on SQLite + SMTP only.
 
 | Scheduler | Interval | Purpose |
 |---|---|---|
-| Events Poller | Dynamic (from GitHub `X-Poll-Interval`, starts at 60s) | Detects new/updated issues via GitHub Events API + ETag |
+| Events Poller | Dynamic (from GitHub `X-Poll-Interval`, starts at 60s; first tick at 2s after startup) | Detects new/updated issues via GitHub Events API + ETag |
 | Email Sender | Fixed 20s | Drains PENDING notification records, sends emails, retries failures |
 
 ### Event Detection Flow
 
 ```
 GitHub Events API (GET /repos/{owner}/{repo}/events)
-  + ETag (If-None-Match header)  →  304 = nothing changed (free)
-                                 →  200 = new events, filter by IssuesEvent
-                                       action=opened|labeled + has watched label
-                                       → create NotificationRecord (PENDING)
-                                       action=edited|labeled|... on already-selected issue
-                                       → set hasPendingUpdate=true
+  + ETag (If-None-Match header)  →  304 = nothing changed (free, no rate-limit cost)
+                                 →  200 = new events
+                                       Save ETag + pollInterval to DB first
+                                       ↓
+                                       isWithinNotifyWindow()?
+                                         NO  → events permanently consumed/skipped, return
+                                         YES → process events:
+                                               IssuesEvent action=opened|labeled
+                                                 + has watched label
+                                                 + issue created within 7 days
+                                                 + daily limit not reached
+                                                 → create NotificationRecord (PENDING)
+                                                 → increment dailySelectedCount
+                                               Any IssuesEvent (any action)
+                                                 + already-selected issue
+                                                 + action=edited → sync changed title/body fields
+                                                 → set hasPendingUpdate=true
+                                               Any IssueCommentEvent (any action)
+                                                 + already-selected issue
+                                                 → set hasPendingUpdate=true
+  403 (rate limited)             →  back off to 120s
 ```
 
 ### Email Sending Flow
 
 ```
 Every 20 seconds:
-  1. Find all NotificationRecord WHERE status=PENDING AND deletedAt=null
-     → try sendMail → success: status=SENT, notifiedAt=now
-                    → fail:   attempts++, retry next 20s (indefinite)
+  isWithinNotifyWindow()? NO → skip (safety net for window-edge race condition)
 
-  2. Find all NotificationRecord WHERE status=SENT AND hasPendingUpdate=true AND deletedAt=null
-     → try sendMail (update email) → success: hasPendingUpdate=false, updateEmailCount++
-                                   → fail:   retry next 20s (indefinite)
+  Fetch PENDING records + SENT+hasPendingUpdate records in one parallel DB query
+
+  Send all emails in parallel (Promise.all):
+
+  For each PENDING record:
+    → try sendMail → success: status=SENT, notifiedAt=now, attempts++
+                   → fail:   attempts++, lastAttemptAt=now, retry next 20s (indefinite)
+
+  For each SENT+hasPendingUpdate record:
+    → try sendMail (update email) → success: hasPendingUpdate=false, updateEmailCount++, lastUpdateEmailAt=now
+                                  → fail:   retry next 20s (indefinite)
 ```
+
+### Notification Window
+
+- Configured via `notifyStartTime`, `notifyEndTime` (HH:MM, 24h), and `notifyTimezone` (IANA)
+- Both must be set for the filter to activate; empty strings = always notify
+- Checked in the **poller** (after ETag save): events outside the window are permanently consumed with no record created
+- Checked again in the **sender** as a safety net for boundary-edge races
+- Supports overnight windows (e.g. `22:00`–`06:00`)
 
 ### Daily Issue Limit
 
 - `Config.dailySelectedCount` tracks how many new issues were selected today
-- Reset to 0 at midnight (checked on every poller cycle)
+- Compared against `Config.dailyResetDate` (YYYY-MM-DD) on every poller cycle; resets to 0 on new day
 - Update emails for already-selected issues are NOT counted against the limit
-- Default limit: 4 new issues per day
+- Default limit: 4 new issues per day (configurable 1–100)
+- Issues created more than 7 days ago are skipped (staleness filter, new selections only)
+
+---
+
+## Environment Variables
+
+Set in `backend/.env` (copy from `backend/.env.example`).
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `NODE_ENV` | No | `development` | `development` \| `test` \| `production` |
+| `PORT` | No | `3001` | HTTP server port |
+| `DATABASE_URL` | Yes | — | SQLite path, e.g. `file:./dev.db` |
+| `SMTP_HOST` | Yes | — | SMTP server hostname (e.g. `smtp.gmail.com`) |
+| `SMTP_PORT` | No | `587` | SMTP server port |
+| `SMTP_SECURE` | No | `false` | `true` for port 465 / SSL |
+| `SMTP_USER` | Yes | — | SMTP auth email (also used as sender address) |
+| `SMTP_PASS` | Yes | — | SMTP auth password / app password |
+| `CORS_ORIGIN` | No | `*` | Allowed CORS origin(s) |
+
+> **Runtime config** (repo, label, email, notify window, etc.) is managed via `PUT /api/config` — not env vars.
 
 ---
 
@@ -57,63 +107,258 @@ Every 20 seconds:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| notificationEmail | String | "" | Email address to notify |
-| watchedRepo | String | "Expensify/App" | GitHub repo (owner/repo) |
-| watchedLabel | String | "Help Wanted" | Label to watch for |
-| issueLimit | Int | 4 | Max new issues selected per day |
-| githubToken | String? | null | Optional PAT (5000 req/hr vs 60) |
-| lastEtag | String? | null | Last ETag from Events API |
-| pollIntervalSeconds | Int | 60 | Updated dynamically from X-Poll-Interval |
-| dailySelectedCount | Int | 0 | New issues selected today |
-| dailyResetDate | String | "" | YYYY-MM-DD of last reset |
-| isRunning | Boolean | false | Master on/off switch |
+| id | String PK | `"singleton"` | Always one row |
+| notificationEmail | String | `""` | Email address to notify |
+| watchedRepo | String | `"Expensify/App"` | GitHub repo (`owner/repo`) |
+| watchedLabel | String | `"Help Wanted"` | Label to watch for |
+| issueLimit | Int | `4` | Max new issues selected per day (1–100) |
+| githubToken | String? | `null` | Optional PAT (5 000 req/hr vs 60) |
+| lastEtag | String? | `null` | Last ETag from Events API |
+| pollIntervalSeconds | Int | `60` | Updated dynamically from `X-Poll-Interval` |
+| dailySelectedCount | Int | `0` | New issues selected today |
+| dailyResetDate | String | `""` | YYYY-MM-DD of last daily reset |
+| isRunning | Boolean | `false` | Master on/off switch |
+| notifyStartTime | String | `""` | Window start in `HH:MM` (24h). Empty = no filter |
+| notifyEndTime | String | `""` | Window end in `HH:MM` (24h). Empty = no filter |
+| notifyTimezone | String | `"UTC"` | IANA timezone for the notify window |
+| updatedAt | DateTime | auto | Last update timestamp |
 
 ### NotificationRecord (one per selected issue)
 
-| Field | Type | Description |
-|---|---|---|
-| githubIssueNumber | Int (unique) | GitHub issue number |
-| title | String | Issue title |
-| url | String | Issue URL |
-| repoFullName | String | owner/repo |
-| matchedLabel | String | Label that triggered selection |
-| status | Enum | PENDING → SENT (or FAILED stays PENDING for retry) |
-| attempts | Int | Number of email send attempts |
-| notifiedAt | DateTime? | When initial email was sent |
-| hasPendingUpdate | Boolean | True when update email needs sending |
-| updateEmailCount | Int | Total update emails sent |
-| deletedAt | DateTime? | Soft delete timestamp (null = active) |
+| Field | Type | Default | Description |
+|---|---|---|---|
+| id | String PK (CUID) | auto | Unique record ID |
+| githubIssueNumber | Int (unique) | — | GitHub issue number |
+| title | String | — | Issue title (kept current; updated on `edited` events) |
+| url | String | — | Issue URL |
+| repoFullName | String | — | `owner/repo` |
+| matchedLabel | String | — | Label that triggered selection |
+| status | Enum | `PENDING` | `PENDING` → `SENT` (failures stay `PENDING` and retry) |
+| attempts | Int | `0` | Total send attempts |
+| lastAttemptAt | DateTime? | `null` | Timestamp of last send attempt |
+| notifiedAt | DateTime? | `null` | When initial email was successfully sent |
+| hasPendingUpdate | Boolean | `false` | True when an update email needs sending |
+| updateEmailCount | Int | `0` | Total update emails sent |
+| lastUpdateEmailAt | DateTime? | `null` | Timestamp of last update email |
+| deletedAt | DateTime? | `null` | Soft-delete timestamp (`null` = active) |
+| createdAt | DateTime | `now()` | Record creation time |
+| updatedAt | DateTime | auto | Last update time |
+
+### Enum: NotifStatus
+- `PENDING` — not yet sent; retried every 20s within the notify window
+- `SENT` — initial email delivered successfully
+- `FAILED` — defined in schema; currently records stay `PENDING` and retry indefinitely
 
 ---
 
 ## API Endpoints
 
-### Config
-
-| Method | Route | Description |
-|---|---|---|
-| GET | /api/config | Get current config (hides githubToken) |
-| PUT | /api/config | Update config fields |
-| GET | /api/config/status | Quick status: isRunning, daily counts, poll interval |
-| POST | /api/config/start | Start notification service (requires notificationEmail) |
-| POST | /api/config/stop | Stop notification service |
-
-### Notifications (Issues)
-
-| Method | Route | Description |
-|---|---|---|
-| GET | /api/notifications | List all records (paginated, filterable by status) |
-| GET | /api/notifications/:id | Get single record |
-| DELETE | /api/notifications/:id | Soft delete (sets deletedAt) |
-| DELETE | /api/notifications/:id/hard | Hard delete (permanent) |
-| POST | /api/notifications/:id/restore | Restore a soft-deleted record |
+All `/api/*` routes are rate-limited to **200 requests per 15 minutes**. Request body size limit is **10 KB**.
 
 ### Health
 
 | Method | Route | Description |
 |---|---|---|
-| GET | /health | Uptime check |
-| GET | /health/ready | DB connectivity check |
+| GET | `/health` | Returns uptime; no rate limit |
+| GET | `/health/ready` | DB connectivity check; 503 if DB unreachable |
+
+### Config
+
+| Method | Route | Description |
+|---|---|---|
+| GET | `/api/config` | Current config (token hidden, `hasGithubToken` bool returned) |
+| PUT | `/api/config` | Partial update of config fields |
+| GET | `/api/config/status` | Quick status snapshot including window state |
+| POST | `/api/config/start` | Enable notification service (400 if no `notificationEmail`) |
+| POST | `/api/config/stop` | Disable notification service |
+
+### Notifications
+
+| Method | Route | Description |
+|---|---|---|
+| GET | `/api/notifications` | Paginated list; filterable by status |
+| GET | `/api/notifications/:id` | Single record by CUID |
+| DELETE | `/api/notifications/:id` | Soft delete (sets `deletedAt`); 409 if already deleted |
+| DELETE | `/api/notifications/:id/hard` | Permanent delete |
+| POST | `/api/notifications/:id/restore` | Un-soft-delete; 409 if not deleted |
+
+---
+
+## Request & Response Shapes
+
+### GET /health
+```json
+{ "status": "ok", "uptime": 123.456 }
+```
+
+### GET /health/ready
+```json
+{ "status": "ready",     "db": "connected"    }
+{ "status": "not ready", "db": "disconnected" }
+```
+
+### GET /api/config
+```json
+{
+  "config": {
+    "id": "singleton",
+    "notificationEmail": "you@example.com",
+    "watchedRepo": "Expensify/App",
+    "watchedLabel": "Help Wanted",
+    "issueLimit": 4,
+    "pollIntervalSeconds": 60,
+    "dailySelectedCount": 2,
+    "dailyResetDate": "2025-02-15",
+    "isRunning": true,
+    "notifyStartTime": "09:00",
+    "notifyEndTime": "18:00",
+    "notifyTimezone": "Asia/Kolkata",
+    "updatedAt": "2025-02-15T09:00:00.000Z"
+  },
+  "hasGithubToken": true
+}
+```
+
+### PUT /api/config
+**Request body** (all fields optional):
+```json
+{
+  "notificationEmail": "you@example.com",
+  "watchedRepo": "owner/repo",
+  "watchedLabel": "Help Wanted",
+  "issueLimit": 4,
+  "githubToken": "ghp_...",
+  "notifyStartTime": "09:00",
+  "notifyEndTime": "18:00",
+  "notifyTimezone": "Asia/Kolkata"
+}
+```
+
+**Validation rules:**
+
+| Field | Rule |
+|---|---|
+| `notificationEmail` | Valid email |
+| `watchedRepo` | Must match `^[^/]+\/[^/]+$` |
+| `watchedLabel` | Non-empty string |
+| `issueLimit` | Integer 1–100 |
+| `githubToken` | Non-empty string or `null` |
+| `notifyStartTime` | `HH:MM` (00:00–23:59) or `""` (clears filter) |
+| `notifyEndTime` | `HH:MM` (00:00–23:59) or `""` (clears filter) |
+| `notifyTimezone` | Valid IANA timezone string |
+
+**Side effects:**
+- Changing `watchedRepo` resets `lastEtag`, `dailySelectedCount`, `dailyResetDate`
+- Setting `notifyStartTime` or `notifyEndTime` to `""` disables the window filter
+
+**Response:** same shape as `GET /api/config`.
+
+### GET /api/config/status
+```json
+{
+  "isRunning": true,
+  "watchedRepo": "Expensify/App",
+  "watchedLabel": "Help Wanted",
+  "issueLimit": 4,
+  "notificationEmail": "you@example.com",
+  "dailySelectedCount": 2,
+  "isNewDay": false,
+  "pollIntervalSeconds": 60,
+  "hasGithubToken": true,
+  "notifyStartTime": "09:00",
+  "notifyEndTime": "18:00",
+  "notifyTimezone": "Asia/Kolkata",
+  "isInNotifyWindow": true
+}
+```
+
+- `isNewDay` — `true` when today's date differs from `dailyResetDate`
+- `isInNotifyWindow` — `true` when current time (in `notifyTimezone`) is inside the configured window, or when no window is set
+
+### POST /api/config/start
+```json
+{ "status": "running", "message": "Notification service started" }   // 200
+{ "error": "notificationEmail must be set before starting" }          // 400
+```
+
+### POST /api/config/stop
+```json
+{ "status": "stopped", "message": "Notification service stopped" }
+```
+
+### GET /api/notifications
+**Query params** (all optional):
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `page` | integer ≥ 1 | `1` | Page number |
+| `limit` | integer 1–100 | `20` | Records per page |
+| `status` | `PENDING` \| `SENT` \| `FAILED` | — | Filter by status |
+| `includeDeleted` | boolean | `false` | Include soft-deleted records |
+
+```json
+{
+  "data": [
+    {
+      "id": "cma1b2c3d4",
+      "githubIssueNumber": 42,
+      "title": "Fix login flow",
+      "url": "https://github.com/Expensify/App/issues/42",
+      "repoFullName": "Expensify/App",
+      "matchedLabel": "Help Wanted",
+      "status": "SENT",
+      "attempts": 1,
+      "lastAttemptAt": "2025-02-15T10:30:00.000Z",
+      "notifiedAt": "2025-02-15T10:30:00.000Z",
+      "hasPendingUpdate": false,
+      "updateEmailCount": 0,
+      "lastUpdateEmailAt": null,
+      "deletedAt": null,
+      "createdAt": "2025-02-15T10:00:00.000Z",
+      "updatedAt": "2025-02-15T10:30:00.000Z"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 42,
+    "pages": 3
+  }
+}
+```
+
+### GET /api/notifications/:id
+```json
+{ "data": { /* NotificationRecord */ } }      // 200
+{ "error": "Notification record not found" }  // 404
+```
+
+### DELETE /api/notifications/:id
+```json
+{ "data": { /* updated record */ }, "message": "Record soft-deleted" }  // 200
+{ "error": "Record is already soft-deleted" }                            // 409
+{ "error": "Notification record not found" }                             // 404
+```
+
+### DELETE /api/notifications/:id/hard
+```json
+{ "message": "Record permanently deleted" }   // 200
+{ "error": "Notification record not found" }  // 404
+```
+
+### POST /api/notifications/:id/restore
+```json
+{ "data": { /* restored record */ }, "message": "Record restored" }  // 200
+{ "error": "Record is not soft-deleted" }                             // 409
+{ "error": "Notification record not found" }                          // 404
+```
+
+### Error responses (global)
+```json
+{ "error": "Validation error", "details": { "field": "message" } }  // 400
+{ "error": "Not found" }                                             // 404
+{ "error": "Internal server error" }                                 // 500
+```
 
 ---
 
@@ -127,7 +372,7 @@ cd backend && npm install
 ### 2. Configure environment
 ```bash
 cp .env.example .env
-# Fill in SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
+# Fill in DATABASE_URL, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
 ```
 
 ### 3. Set up database
@@ -149,10 +394,16 @@ curl -X PUT http://localhost:3001/api/config \
     "watchedRepo": "Expensify/App",
     "watchedLabel": "Help Wanted",
     "issueLimit": 4,
-    "githubToken": "ghp_..."
+    "githubToken": "ghp_...",
+    "notifyStartTime": "09:00",
+    "notifyEndTime": "18:00",
+    "notifyTimezone": "Asia/Kolkata"
   }'
 
 curl -X POST http://localhost:3001/api/config/start
+
+# Check current window status
+curl http://localhost:3001/api/config/status
 ```
 
 ---
@@ -173,8 +424,6 @@ curl -X POST http://localhost:3001/api/config/start
 ---
 
 ### Option A — Fly.io (~$2.10/month) ✅ Recommended
-
-#### First-time setup
 
 ```bash
 # 1. Install flyctl
@@ -204,13 +453,10 @@ flyctl secrets set \
 flyctl deploy --remote-only
 ```
 
-#### After deploy — configure the notifier
-
+After deploy:
 ```bash
-# Get your app URL
-flyctl info
+flyctl info   # get your app URL
 
-# Set config (replace URL with your Fly.io URL)
 curl -X PUT https://github-issue-notifier.fly.dev/api/config \
   -H "Content-Type: application/json" \
   -d '{
@@ -218,14 +464,16 @@ curl -X PUT https://github-issue-notifier.fly.dev/api/config \
     "watchedRepo": "Expensify/App",
     "watchedLabel": "Help Wanted",
     "issueLimit": 4,
-    "githubToken": "ghp_..."
+    "githubToken": "ghp_...",
+    "notifyStartTime": "09:00",
+    "notifyEndTime": "18:00",
+    "notifyTimezone": "UTC"
   }'
 
 curl -X POST https://github-issue-notifier.fly.dev/api/config/start
 ```
 
-#### Useful commands
-
+Useful commands:
 ```bash
 flyctl status          # machine status
 flyctl logs            # live logs
@@ -238,13 +486,7 @@ flyctl secrets list    # view secret names (not values)
 
 ### Option B — Oracle Cloud Always Free ($0/month forever)
 
-Best for true zero cost. Gives you 2 AMD VMs (1 OCPU, 1GB RAM) that never expire.
-
 ```bash
-# 1. Sign up at cloud.oracle.com (requires credit card for verification, never charged)
-# 2. Create an Always Free AMD VM (Ubuntu 22.04)
-# 3. SSH in, then:
-
 # Install Node.js 22
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs git
@@ -263,7 +505,7 @@ nano .env   # fill in SMTP_* values, DATABASE_URL=file:./prod.db
 # Push DB schema
 npm run db:push
 
-# Install PM2 (process manager — keeps app running after SSH exit)
+# Install PM2
 sudo npm install -g pm2
 
 # Start with PM2
@@ -271,7 +513,6 @@ pm2 start dist/server.js --name notifier
 pm2 save
 pm2 startup   # run the printed command to auto-start on reboot
 
-# Configure the notifier
 curl -X PUT http://localhost:3001/api/config \
   -H "Content-Type: application/json" \
   -d '{"notificationEmail":"you@example.com","watchedRepo":"Expensify/App","watchedLabel":"Help Wanted","issueLimit":4}'
@@ -279,15 +520,11 @@ curl -X PUT http://localhost:3001/api/config \
 curl -X POST http://localhost:3001/api/config/start
 ```
 
-To access the API from outside, open port 3001 in Oracle's Security List, or put Nginx in front.
-
 ---
 
 ### CI/CD — Auto-deploy on Git Push (Fly.io)
 
-Already configured in [.github/workflows/deploy.yml](../.github/workflows/deploy.yml).
-
-Add these secrets in GitHub → Settings → Secrets → Actions:
+Already configured in [.github/workflows/deploy.yml](.github/workflows/deploy.yml).
 
 | Secret | Value |
 |---|---|
@@ -311,13 +548,25 @@ Every push to `master` that touches `backend/` will auto-deploy.
 
 ## Key Design Decisions
 
-- **No Redis / BullMQ**: Replaced with a simple DB-backed pending queue. The `NotificationRecord` table IS the queue.
-- **No auth**: Single-user tool. Add an `API_KEY` env check if public-facing.
+- **No Redis / BullMQ**: `NotificationRecord` table IS the queue. Status field drives the send loop.
+- **No auth**: Single-user tool. Add an `API_KEY` env check if making public-facing.
 - **Dynamic poll interval**: Reads `X-Poll-Interval` from GitHub response header each cycle. Starts at 60s.
-- **ETag**: Sends `If-None-Match` on every poll. GitHub returns 304 (no rate limit cost) when nothing changed.
-- **Indefinite email retry**: No max attempt cap. Email sender retries every 20s until success.
+- **ETag**: Sends `If-None-Match` on every poll. GitHub returns 304 (no rate-limit cost) when nothing changed.
+- **Notify window — skip, not hold**: Events that arrive outside `notifyStartTime`/`notifyEndTime` are permanently consumed (ETag saved first) with no record created. They are not held for later — they are skipped entirely. Events inside the window are processed normally.
+- **ETag saved before window check**: Ensures events consumed outside the window are not replayed when the window opens.
+- **Window check in sender too**: Safety net for the race where a record is created right at the window boundary and the sender fires just after it closes.
+- **Overnight windows supported**: e.g. `notifyStartTime=22:00`, `notifyEndTime=06:00`.
+- **Indefinite email retry**: No max attempt cap. Failures stay `PENDING` and are retried every 20s (within the window).
+- **Staleness filter**: Issues created more than 7 days ago are silently skipped for new selection only. Already-selected issues always receive update notifications.
+- **Update triggers**: Any `IssuesEvent` or `IssueCommentEvent` on an already-selected issue queues an update email. No action allow-list — every current and future GitHub action is automatically covered. `edited` events additionally sync the title and body fields so emails always show current content.
+- **Title sync on edit**: When an `edited` event carries a changed title, the stored title is updated immediately (regardless of `hasPendingUpdate` state) so the update email always shows the current title.
+- **Update while PENDING**: `hasPendingUpdate` is set even on `PENDING` records. The update email follows the initial one automatically once it is delivered.
+- **Batch DB writes**: New records use `createMany`. `hasPendingUpdate` flags use `updateMany`. Title changes use individual parallel `update` calls. `dailySelectedCount` is written once after the loop — all flushed in a single `Promise.all`.
+- **Parallel email sending**: Initial and update emails are sent concurrently via `Promise.all`. One failure does not block others.
+- **Per-poll DB reads**: A single `findMany` fetches all existing records for the issue numbers seen in a poll batch, replacing per-event queries.
 - **Issue limit is for new selections only**: Update emails on already-selected issues are unlimited.
 - **Rate limit handling**: On 403 from GitHub, backs off to 120s automatically.
+- **Token hidden from API**: `GET /api/config` never returns `githubToken`; only a `hasGithubToken` boolean.
 
 ---
 
@@ -326,26 +575,26 @@ Every push to `master` that touches `backend/` will auto-deploy.
 ```
 backend/src/
   api/
-    config.routes.ts          GET/PUT config, start/stop
-    notifications.routes.ts   GET/soft-delete/hard-delete issues
-    health.routes.ts          health checks
+    config.routes.ts                GET/PUT config, start/stop, isWithinNotifyWindow helper
+    notifications.routes.ts         CRUD for notification records
+    health.routes.ts                /health and /health/ready
   services/
-    events-poller.service.ts  GitHub Events API + ETag logic
-    notification-sender.service.ts  drain PENDING records + send email
-    email.service.ts          Nodemailer wrapper (initial + update emails)
+    events-poller.service.ts        GitHub Events API + ETag logic, window filter, title sync
+    notification-sender.service.ts  Drain PENDING records + send emails, window safety net
+    email.service.ts                Nodemailer wrapper (HTML + plaintext emails)
   jobs/
-    schedulers.ts             two schedulers: poller + email sender
+    schedulers.ts                   Two loops: poller (dynamic interval) + sender (20s)
   middleware/
-    error.middleware.ts       Zod + generic error handler
-    not-found.middleware.ts   404 handler
+    error.middleware.ts             Zod validation + generic 500 handler
+    not-found.middleware.ts         404 handler
   db/
-    client.ts                 Prisma client singleton
+    client.ts                       Prisma client singleton
   utils/
-    env.ts                    Zod-validated env vars
-    logger.ts                 Pino logger
-    octokit.ts                Octokit factory
-  app.ts                      Express app setup
-  server.ts                   Entry point
+    env.ts                          Zod-validated env loader (exits on bad config)
+    logger.ts                       Pino logger (pretty in dev, JSON in prod)
+    octokit.ts                      Octokit factory helper
+  app.ts                            Express app: middleware stack + routers
+  server.ts                         Entry point: DB connect → HTTP listen → schedulers
 prisma/
-  schema.prisma               Config + NotificationRecord models
+  schema.prisma                     Config + NotificationRecord models + NotifStatus enum
 ```

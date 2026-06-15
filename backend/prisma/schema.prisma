@@ -19,6 +19,9 @@ model Config {
   dailySelectedCount  Int      @default(0)
   dailyResetDate      String   @default("")
   isRunning           Boolean  @default(false)
+  notifyStartTime     String   @default("")
+  notifyEndTime       String   @default("")
+  notifyTimezone      String   @default("UTC")
   updatedAt           DateTime @updatedAt
 }
 
@@ -26,6 +29,7 @@ model NotificationRecord {
   id                String      @id @default(cuid())
   githubIssueNumber Int         @unique
   title             String
+  body              String      @default("")
   url               String
   repoFullName      String
   matchedLabel      String

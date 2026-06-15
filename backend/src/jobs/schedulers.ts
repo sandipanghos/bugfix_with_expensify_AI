@@ -16,9 +16,18 @@ export function startSchedulers(): void {
 function startEventsPoller(): void {
   async function runAndReschedule() {
     try {
-      const nextIntervalSeconds = await EventsPollerService.poll();
-      logger.debug({ nextIntervalSeconds }, 'Events poller cycle complete, rescheduling');
-      pollerTimer = setTimeout(runAndReschedule, nextIntervalSeconds * 1000);
+      const { pollInterval, hasChanges } = await EventsPollerService.poll();
+      logger.debug({ pollInterval, hasChanges }, 'Events poller cycle complete, rescheduling');
+
+      // Skip the 20s sender wait — send immediately when the poller finds new
+      // records or new updates so notifications arrive as fast as possible.
+      if (hasChanges) {
+        NotificationSenderService.send().catch((err) =>
+          logger.error(err, 'Immediate email send after poller failed')
+        );
+      }
+
+      pollerTimer = setTimeout(runAndReschedule, pollInterval * 1000);
     } catch (err) {
       logger.error(err, 'Unhandled error in events poller, retrying in 60s');
       pollerTimer = setTimeout(runAndReschedule, 60_000);

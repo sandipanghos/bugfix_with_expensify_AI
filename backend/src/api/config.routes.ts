@@ -5,6 +5,27 @@ import { logger } from '../utils/logger.js';
 
 export const configRouter = Router();
 
+export function isWithinNotifyWindow(startTime: string, endTime: string, timezone: string): boolean {
+  if (!startTime || !endTime) return true; // no filter configured — always notify
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: timezone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date());
+    const h = parts.find((p) => p.type === 'hour')?.value ?? '00';
+    const m = parts.find((p) => p.type === 'minute')?.value ?? '00';
+    const current = `${h.padStart(2, '0')}:${m.padStart(2, '0')}`;
+    // Normal window (09:00–17:00) or overnight window (22:00–06:00)
+    return startTime <= endTime
+      ? current >= startTime && current <= endTime
+      : current >= startTime || current <= endTime;
+  } catch {
+    return true; // invalid timezone — don't block notifications
+  }
+}
+
 const DEFAULT_CONFIG = {
   id: 'singleton',
   notificationEmail: '',
@@ -17,7 +38,27 @@ const DEFAULT_CONFIG = {
   dailySelectedCount: 0,
   dailyResetDate: '',
   isRunning: false,
+  notifyStartTime: '',
+  notifyEndTime: '',
+  notifyTimezone: 'UTC',
 };
+
+// HH:MM or empty string
+const timeSchema = z
+  .string()
+  .regex(/^$|^([01]\d|2[0-3]):[0-5]\d$/, 'Must be HH:MM (00:00–23:59) or empty string');
+
+const timezoneSchema = z.string().refine(
+  (tz) => {
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: tz });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  { message: 'Must be a valid IANA timezone (e.g. UTC, Asia/Kolkata, America/New_York)' }
+);
 
 async function getOrCreateConfig() {
   return prisma.config.upsert({
@@ -47,6 +88,9 @@ const updateConfigSchema = z.object({
   watchedLabel: z.string().min(1).optional(),
   issueLimit: z.coerce.number().int().min(1).max(100).optional(),
   githubToken: z.string().min(1).nullable().optional(),
+  notifyStartTime: timeSchema.optional(),
+  notifyEndTime: timeSchema.optional(),
+  notifyTimezone: timezoneSchema.optional(),
 });
 
 // PUT /api/config
@@ -88,6 +132,10 @@ configRouter.get('/status', async (_req, res, next) => {
       isNewDay: config.dailyResetDate !== today,
       pollIntervalSeconds: config.pollIntervalSeconds,
       hasGithubToken: !!config.githubToken,
+      notifyStartTime: config.notifyStartTime,
+      notifyEndTime: config.notifyEndTime,
+      notifyTimezone: config.notifyTimezone,
+      isInNotifyWindow: isWithinNotifyWindow(config.notifyStartTime, config.notifyEndTime, config.notifyTimezone),
     });
   } catch (err) {
     next(err);
