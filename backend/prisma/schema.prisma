@@ -37,6 +37,8 @@ model NotificationRecord {
   attempts          Int         @default(0)
   lastAttemptAt     DateTime?
   notifiedAt        DateTime?
+  commentCount      Int         @default(0)
+  githubUpdatedAt   String      @default("")
   hasPendingUpdate  Boolean     @default(false)
   updateEmailCount  Int         @default(0)
   lastUpdateEmailAt DateTime?

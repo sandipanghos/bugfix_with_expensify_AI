@@ -4,15 +4,30 @@ import { sendIssueNotification } from './email.service.js';
 import { isWithinNotifyWindow } from '../api/config.routes.js';
 
 export class NotificationSenderService {
+  // Prevents two concurrent send() calls from running the same batch in parallel,
+  // which would cause duplicate update emails for the same hasPendingUpdate record.
+  private static isSending = false;
+
   static async send(): Promise<void> {
+    if (NotificationSenderService.isSending) {
+      logger.debug('Sender already running, skipping concurrent invocation');
+      return;
+    }
+    NotificationSenderService.isSending = true;
+    try {
+      await NotificationSenderService._send();
+    } finally {
+      NotificationSenderService.isSending = false;
+    }
+  }
+
+  private static async _send(): Promise<void> {
     const config = await prisma.config.findUnique({ where: { id: 'singleton' } });
 
     if (!config || !config.isRunning || !config.notificationEmail) return;
 
-    // Safety net: poller already skips events outside the window, but a record
-    // created right at the window boundary could still be PENDING when the window
-    // closes. Don't send it — it will be cleared on the next daily reset or the
-    // user can hard-delete it manually.
+    // Safety net: the poller still syncs field changes outside the window, but
+    // emails must only go out inside the window.
     if (!isWithinNotifyWindow(config.notifyStartTime, config.notifyEndTime, config.notifyTimezone)) {
       logger.debug(
         { notifyStartTime: config.notifyStartTime, notifyEndTime: config.notifyEndTime, notifyTimezone: config.notifyTimezone },
@@ -64,7 +79,7 @@ export class NotificationSenderService {
             where: { id: record.id },
             data: { attempts: { increment: 1 }, lastAttemptAt: new Date() },
           });
-          logger.error(err, `Failed to send notification for issue #${record.githubIssueNumber}, will retry in 20s`);
+          logger.error(err, `Failed to send notification for issue #${record.githubIssueNumber}, will retry next poll cycle`);
         }
       }),
 
@@ -95,7 +110,7 @@ export class NotificationSenderService {
           logger.info({ issueNumber: record.githubIssueNumber, updateCount }, 'Update notification sent');
         } catch (err) {
           // hasPendingUpdate stays true — retried automatically on next 20s cycle
-          logger.error(err, `Failed to send update notification for issue #${record.githubIssueNumber}, will retry in 20s`);
+          logger.error(err, `Failed to send update notification for issue #${record.githubIssueNumber}, will retry next poll cycle`);
         }
       }),
     ]);

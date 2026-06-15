@@ -10,12 +10,13 @@ No webhooks, no Redis, no job queues. Runs on SQLite + SMTP only.
 
 ## Architecture
 
-### Two Schedulers (always running)
+### Three Schedulers (always running)
 
 | Scheduler | Interval | Purpose |
 |---|---|---|
 | Events Poller | Dynamic (from GitHub `X-Poll-Interval`, starts at 60s; first tick at 2s after startup) | Detects new/updated issues via GitHub Events API + ETag |
 | Email Sender | Fixed 20s | Drains PENDING notification records, sends emails, retries failures |
+| Issue Syncer | Fixed 1min (first run 30s after startup) | Directly polls REST API for each tracked issue; detects title/body changes the Events API delayed or missed |
 
 ### Event Detection Flow
 
@@ -25,9 +26,7 @@ GitHub Events API (GET /repos/{owner}/{repo}/events)
                                  →  200 = new events
                                        Save ETag + pollInterval to DB first
                                        ↓
-                                       isWithinNotifyWindow()?
-                                         NO  → events permanently consumed/skipped, return
-                                         YES → process events:
+                                       Always (window does NOT gate record creation):
                                                IssuesEvent action=opened|labeled
                                                  + has watched label
                                                  + issue created within 7 days
@@ -41,14 +40,18 @@ GitHub Events API (GET /repos/{owner}/{repo}/events)
                                                Any IssueCommentEvent (any action)
                                                  + already-selected issue
                                                  → set hasPendingUpdate=true
+                                       isWithinNotifyWindow()?
+                                         NO  → emails held in DB until window opens (sender gates sending)
   403 (rate limited)             →  back off to 120s
 ```
 
 ### Email Sending Flow
 
 ```
-Every 20 seconds:
-  isWithinNotifyWindow()? NO → skip (safety net for window-edge race condition)
+Every 20 seconds (and immediately after any poller cycle that made DB changes):
+  Already sending? → skip (concurrency lock prevents duplicate sends)
+  isWithinNotifyWindow()? NO → skip (poller may have set hasPendingUpdate outside window;
+                                      email held until window opens)
 
   Fetch PENDING records + SENT+hasPendingUpdate records in one parallel DB query
 
@@ -67,8 +70,8 @@ Every 20 seconds:
 
 - Configured via `notifyStartTime`, `notifyEndTime` (HH:MM, 24h), and `notifyTimezone` (IANA)
 - Both must be set for the filter to activate; empty strings = always notify
-- Checked in the **poller** (after ETag save): events outside the window are permanently consumed with no record created
-- Checked again in the **sender** as a safety net for boundary-edge races
+- Checked in the **poller** (after ETag save): new record creation is skipped outside the window, but field syncs and `hasPendingUpdate` for existing records still happen so no update is lost
+- Checked in the **sender**: emails are held until the window opens (regardless of when hasPendingUpdate was set)
 - Supports overnight windows (e.g. `22:00`–`06:00`)
 
 ### Daily Issue Limit
@@ -178,6 +181,7 @@ All `/api/*` routes are rate-limited to **200 requests per 15 minutes**. Request
 |---|---|---|
 | GET | `/api/notifications` | Paginated list; filterable by status |
 | GET | `/api/notifications/:id` | Single record by CUID |
+| POST | `/api/notifications/track` | Manually track an issue by number (fetches from GitHub, creates PENDING record) |
 | DELETE | `/api/notifications/:id` | Soft delete (sets `deletedAt`); 409 if already deleted |
 | DELETE | `/api/notifications/:id/hard` | Permanent delete |
 | POST | `/api/notifications/:id/restore` | Un-soft-delete; 409 if not deleted |
@@ -352,6 +356,20 @@ All `/api/*` routes are rate-limited to **200 requests per 15 minutes**. Request
 { "error": "Record is not soft-deleted" }                             // 409
 { "error": "Notification record not found" }                          // 404
 ```
+
+### POST /api/notifications/track
+**Request body:**
+```json
+{ "issueNumber": 42 }
+```
+**Response:**
+```json
+{ "data": { /* NotificationRecord with status=PENDING */ }, "message": "Issue #42 is now being tracked" }  // 201
+{ "error": "Issue #42 is already being tracked" }                                                          // 409
+{ "error": "Issue #42 not found in Expensify/App" }                                                        // 404
+{ "error": "watchedRepo is not configured (expected owner/repo)" }                                         // 400
+```
+If the issue was previously soft-deleted, it is restored and re-queued as PENDING.
 
 ### Error responses (global)
 ```json
@@ -552,9 +570,10 @@ Every push to `master` that touches `backend/` will auto-deploy.
 - **No auth**: Single-user tool. Add an `API_KEY` env check if making public-facing.
 - **Dynamic poll interval**: Reads `X-Poll-Interval` from GitHub response header each cycle. Starts at 60s.
 - **ETag**: Sends `If-None-Match` on every poll. GitHub returns 304 (no rate-limit cost) when nothing changed.
-- **Notify window — skip, not hold**: Events that arrive outside `notifyStartTime`/`notifyEndTime` are permanently consumed (ETag saved first) with no record created. They are not held for later — they are skipped entirely. Events inside the window are processed normally.
-- **ETag saved before window check**: Ensures events consumed outside the window are not replayed when the window opens.
-- **Window check in sender too**: Safety net for the race where a record is created right at the window boundary and the sender fires just after it closes.
+- **Notify window gates email sending only**: The poller always creates records and syncs field changes regardless of `notifyStartTime`/`notifyEndTime`. The sender's window check is the sole gate on when emails are delivered. Issues labeled during off-hours are tracked immediately and emailed when the window opens — nothing is permanently lost due to timing.
+- **Same-batch update folding**: If a newly-selected issue also triggers update detection in the same poll cycle (e.g. opened + commented within the same 60-second window), the update is folded directly into the `createMany` entry so `hasPendingUpdate=true` is set atomically on creation, avoiding a `createMany`/`updateMany` parallel-write race.
+- **ETag saved before window check**: Ensures events are not replayed when the window opens.
+- **Sender concurrency lock**: `NotificationSenderService.isSending` flag prevents two concurrent sender runs (e.g. the immediate post-poller send and the 20s interval overlapping), which would send duplicate update emails.
 - **Overnight windows supported**: e.g. `notifyStartTime=22:00`, `notifyEndTime=06:00`.
 - **Indefinite email retry**: No max attempt cap. Failures stay `PENDING` and are retried every 20s (within the window).
 - **Staleness filter**: Issues created more than 7 days ago are silently skipped for new selection only. Already-selected issues always receive update notifications.
@@ -581,6 +600,7 @@ backend/src/
   services/
     events-poller.service.ts        GitHub Events API + ETag logic, window filter, title sync
     notification-sender.service.ts  Drain PENDING records + send emails, window safety net
+    issue-syncer.service.ts         REST API poll for each tracked issue every 1min; catches missed Events API changes
     email.service.ts                Nodemailer wrapper (HTML + plaintext emails)
   jobs/
     schedulers.ts                   Two loops: poller (dynamic interval) + sender (20s)
