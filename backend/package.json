@@ -1,5 +1,5 @@
 {
-  "name": "github-issue-notifier-ai-sandipan",
+  "name": "expensify-backend-wispy-coastline-4104",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -28,7 +28,6 @@
     "db:reset": "prisma migrate reset --force"
   },
   "dependencies": {
-    "@flydotio/litestream": "^1.0.1",
     "@octokit/rest": "^21.0.0",
     "@prisma/client": "^6.0.0",
     "cors": "^2.8.6",
@@ -41,7 +40,6 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@flydotio/dockerfile": "^0.7.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
@@ -56,8 +54,5 @@
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^2.0.0"
-  },
-  "dockerfile": {
-    "litestream": true
   }
 }
