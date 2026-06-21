@@ -22,8 +22,10 @@ interface RepoEvent {
 
 const RECENTLY_CREATED_DAYS = 7;
 
-// Any IssuesEvent or IssueCommentEvent on an already-selected issue triggers an update.
-// No action allow-list — new GitHub actions are automatically covered.
+// Short-lived cache populated by fastPoll() so AutoProposalService can skip the redundant
+// GET /issues/:number call — the data was already fetched during detection.
+export const issueDataCache = new Map<number, { title: string; body: string; cachedAt: number }>();
+const ISSUE_CACHE_TTL_MS = 2 * 60 * 1000;
 
 function isRecentlyCreated(createdAt: string): boolean {
   const ageMs = Date.now() - new Date(createdAt).getTime();
@@ -129,6 +131,7 @@ export class EventsPollerService {
             matchedLabel: string;
             status: 'PENDING';
             hasPendingUpdate: boolean;
+            labelDetectedAt: Date;
           }> = [];
           const toMarkUpdate = new Set<number>();                                   // flag-only updates (hasPendingUpdate=true)
           const toUpdateFields = new Map<number, { title?: string; body?: string }>(); // edited issues: synced fields + flag
@@ -169,6 +172,7 @@ export class EventsPollerService {
                   matchedLabel: config.watchedLabel,
                   status: 'PENDING' as const,
                   hasPendingUpdate: false,
+                  labelDetectedAt: new Date(),
                 };
                 toCreate.push(newEntry);
                 createdThisCycle.add(issue.number);
@@ -370,5 +374,117 @@ export class EventsPollerService {
     }
 
     return { pollInterval, hasChanges: eventHasChanges || syncHasChanges };
+  }
+
+  // Tracks the timestamp of the last fast-poll so we only fetch issues created/updated since then.
+  // In-memory: resets to 5 min ago on server restart, which is a safe lookback window.
+  private static lastFastPollAt: Date = new Date(Date.now() - 5 * 60 * 1000);
+
+  // Polls GET /repos/.../issues?labels=...&since=<lastFastPollAt> every 5s for near-immediate
+  // detection of new "Help Wanted" issues, independently of the 60s Events API interval.
+  static async fastPoll(): Promise<boolean> {
+    const config = await prisma.config.findUnique({ where: { id: 'singleton' } });
+    if (!config || !config.isRunning) return false;
+
+    const parts = config.watchedRepo.split('/');
+    if (parts.length !== 2) return false;
+    const [owner, repo] = parts as [string, string];
+
+    // Daily reset is owned by the main poller; skip fast poll if the day hasn't been initialised yet.
+    const today = new Date().toISOString().slice(0, 10);
+    if (config.dailyResetDate !== today) return false;
+    if (config.dailySelectedCount >= config.issueLimit) return false;
+
+    const since = EventsPollerService.lastFastPollAt.toISOString();
+    EventsPollerService.lastFastPollAt = new Date();
+
+    const octokit = new Octokit({ auth: config.githubToken ?? undefined });
+
+    try {
+      const response = await octokit.request('GET /repos/{owner}/{repo}/issues', {
+        owner,
+        repo,
+        labels: config.watchedLabel,
+        sort: 'created',
+        direction: 'desc',
+        since,
+        state: 'open',
+        per_page: 10,
+      });
+
+      const issues = (response.data ?? []) as IssuePayload[];
+      if (issues.length === 0) return false;
+
+      const issueNumbers = issues.map((i) => i.number);
+      const existing = await prisma.notificationRecord.findMany({
+        where: { githubIssueNumber: { in: issueNumbers } },
+        select: { githubIssueNumber: true },
+      });
+      const existingNums = new Set(existing.map((r) => r.githubIssueNumber));
+
+      const toCreate: Array<{
+        githubIssueNumber: number;
+        title: string;
+        body: string;
+        url: string;
+        repoFullName: string;
+        matchedLabel: string;
+        status: 'PENDING';
+        hasPendingUpdate: boolean;
+        labelDetectedAt: Date;
+      }> = [];
+      let newDailyCount = config.dailySelectedCount;
+
+      for (const issue of issues) {
+        if (existingNums.has(issue.number)) continue;
+        if (!isRecentlyCreated(issue.created_at)) continue;
+        if (newDailyCount >= config.issueLimit) break;
+
+        toCreate.push({
+          githubIssueNumber: issue.number,
+          title: issue.title,
+          body: issue.body ?? '',
+          url: issue.html_url,
+          repoFullName: config.watchedRepo,
+          matchedLabel: config.watchedLabel,
+          status: 'PENDING' as const,
+          hasPendingUpdate: false,
+          labelDetectedAt: new Date(),
+        });
+        newDailyCount++;
+        logger.info({ issueNumber: issue.number }, 'Fast poller: new issue detected');
+      }
+
+      if (toCreate.length === 0) return false;
+
+      // Cache issue data so AutoProposalService skips the redundant GET /issues/:number call.
+      const now = Date.now();
+      for (const entry of toCreate) {
+        issueDataCache.set(entry.githubIssueNumber, { title: entry.title, body: entry.body, cachedAt: now });
+      }
+
+      // Evict stale entries from previous cycles to keep memory clean.
+      for (const [num, cached] of issueDataCache) {
+        if (now - cached.cachedAt > ISSUE_CACHE_TTL_MS) issueDataCache.delete(num);
+      }
+
+      await Promise.all([
+        prisma.notificationRecord.createMany({ data: toCreate, skipDuplicates: true }),
+        prisma.config.update({
+          where: { id: 'singleton' },
+          data: { dailySelectedCount: newDailyCount },
+        }),
+      ]);
+
+      return true;
+    } catch (err: unknown) {
+      const status = (err as { status?: number }).status;
+      if (status === 403) {
+        logger.warn('Fast poller: rate limited, backing off');
+      } else if (status !== 304) {
+        logger.error(err, 'Fast poller failed');
+      }
+      return false;
+    }
   }
 }

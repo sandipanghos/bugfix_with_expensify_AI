@@ -1,3 +1,9 @@
+> **Note:** This file captures (1) the human Expensify contributor workflow (Upwork hiring, PR process — background context, not something this codebase automates) and (2) the original informal requirements/notes written before implementation. It is not a description of the system as built. Two notable differences from what shipped:
+> - This doc says "Grace period 24 hours" (line 39) — the implemented staleness filter is **7 days**, not 24 hours, and there is no 24-hour grace-period concept anywhere in the code (see [ARCHITECTURE.md](ARCHITECTURE.md) Section 5, "Recently-created filter").
+> - This doc envisions posting a proposal comment **immediately and automatically** when the watched label is added (line 50). What shipped is `POST /api/proposals` — a manually-triggered endpoint, gated by three guards (duplicate proposal, pending assigned work, similarity to existing proposals), not an automatic action taken by the poller.
+>
+> For the current, accurate system description, see [ARCHITECTURE.md](ARCHITECTURE.md), [README.md](README.md), and the root [CLAUDE.md](../CLAUDE.md).
+
 # Full Workflow: Proposal → PR
 ## 1. Step 1: Wait for Help Wanted Label
 You can only submit a proposal after Expensify adds the Help Wanted label to an issue.
@@ -58,3 +64,4 @@ Review + merge	Expensify engineer + Contributor-Plus
 7. You must then post a comment with your expected timeline for PR readiness.
 
 8. Don't submit Proposal in any issue if user who submit the proposal already have an assigned issue/PR waiting on his action.
+

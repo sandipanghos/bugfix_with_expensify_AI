@@ -28,6 +28,7 @@
     "db:reset": "prisma migrate reset --force"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
     "@flydotio/litestream": "^1.0.1",
     "@octokit/rest": "^21.0.0",
     "@prisma/client": "^6.0.0",

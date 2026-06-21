@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit';
 
 import { configRouter } from './api/config.routes.js';
 import { notificationsRouter } from './api/notifications.routes.js';
+import { proposalsRouter } from './api/proposals.routes.js';
 import { healthRouter } from './api/health.routes.js';
 import { errorHandler } from './middleware/error.middleware.js';
 import { notFoundHandler } from './middleware/not-found.middleware.js';
@@ -35,6 +36,7 @@ export function createApp() {
   app.use('/health', healthRouter);
   app.use('/api/config', configRouter);
   app.use('/api/notifications', notificationsRouter);
+  app.use('/api/proposals', proposalsRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

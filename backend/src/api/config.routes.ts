@@ -41,6 +41,8 @@ const DEFAULT_CONFIG = {
   notifyStartTime: '',
   notifyEndTime: '',
   notifyTimezone: 'UTC',
+  myGithubUsername: '',
+  autoProposal: false,
 };
 
 // HH:MM or empty string
@@ -91,6 +93,8 @@ const updateConfigSchema = z.object({
   notifyStartTime: timeSchema.optional(),
   notifyEndTime: timeSchema.optional(),
   notifyTimezone: timezoneSchema.optional(),
+  myGithubUsername: z.string().optional(),
+  autoProposal: z.boolean().optional(),
 });
 
 // PUT /api/config
@@ -136,6 +140,8 @@ configRouter.get('/status', async (_req, res, next) => {
       notifyEndTime: config.notifyEndTime,
       notifyTimezone: config.notifyTimezone,
       isInNotifyWindow: isWithinNotifyWindow(config.notifyStartTime, config.notifyEndTime, config.notifyTimezone),
+      myGithubUsername: config.myGithubUsername,
+      autoProposal: config.autoProposal,
     });
   } catch (err) {
     next(err);

@@ -14,13 +14,13 @@ Phase 2: Backend Core
    Express.js → Prisma + SQLite → REST API Design → Zod Validation
 
 Phase 3: Integrations
-   GitHub Events API → ETag / Conditional Requests → Nodemailer (SMTP)
+   GitHub Events API → ETag / Conditional Requests → Nodemailer (SMTP) → Anthropic SDK (LLM proposals)
 
 Phase 4: Scheduling & Reliability
-   setTimeout vs setInterval → Dynamic intervals → Retry patterns
+   Recursive setTimeout with a dynamic interval → reactive (not separately-timed) sends → Retry patterns
 
 Phase 5: Testing
-   Vitest → Supertest → MSW (API mocking)
+   Vitest → Supertest → vi.mock() for Octokit/Prisma (no MSW/nock in this codebase)
 
 Phase 6: DevOps
    Docker (multi-stage builds) → Fly.io → GitHub Actions CI/CD
@@ -264,10 +264,11 @@ GET /repos/{owner}/{repo}/events?per_page=20
 
 | Action | Meaning | What we do |
 |---|---|---|
-| `opened` | Issue created | Select if has watched label + under daily limit |
-| `labeled` | Label added to issue | Select if new, or queue update if already selected |
-| `edited` | Title/body changed | Queue update email for already-selected issues |
-| `reopened` | Issue reopened | Queue update email for already-selected issues |
+| `opened` / `labeled` | Issue created / label added | Select as a new tracked issue if it has the watched label, isn't already tracked, and the daily limit isn't reached |
+| any other `IssuesEvent` action (`edited`, `reopened`, `closed`, future actions GitHub adds, etc.) | Anything else happens to an already-tracked issue | Queue an update email (`hasPendingUpdate=true`); `edited` additionally syncs the stored title/body |
+| `IssueCommentEvent` (any action) | A comment is added/edited/deleted on an already-tracked issue | Queue an update email |
+
+There's deliberately no action allow-list for updates — any event on a tracked issue queues an update. On top of this, a **separate direct REST sync** runs every poller cycle (independent of the Events API result) and polls `GET /repos/{owner}/{repo}/issues/{n}` for every tracked issue, comparing `title`, `body`, comment count, and `updated_at` — this catches activity the Events API missed or that arrived during a `304` cycle.
 
 **Resources:**
 - [GitHub Events API Docs](https://docs.github.com/en/rest/activity/events)
@@ -348,33 +349,67 @@ await transporter.sendMail({
 
 ---
 
+### 3.4 Anthropic SDK (LLM-generated proposals)
+
+`POST /api/proposals` uses `@anthropic-ai/sdk` to generate a contributor proposal comment from an issue's title/body/comments — no source code access, so the result is a text-based hypothesis, not a verified root cause.
+
+**Key concepts:**
+- The LLM call only happens after two cheap guards pass (no duplicate proposal for this contributor, no pending assigned work elsewhere) — avoids wasting a generation on a disqualified request
+- A third guard (similarity to existing proposals, via Jaccard word-overlap on the generated root cause) runs *after* generation, since it depends on the LLM's output
+- There's no draft/approve step — a passing request posts the GitHub comment immediately and persists a `ProposalRecord`
+
+**Where you'll see it:**
+```typescript
+// services/proposal-generator.service.ts
+const generated = await generateProposal({
+  repoFullName, issueNumber, issueTitle, issueBody, issueComments,
+});
+// → { rootCause, proposedChange, alternatives }
+```
+
+```typescript
+// api/proposals.routes.ts — guard ordering
+await assertNoExistingProposal(comments, issueNumber, repoFullName, contributorUsername);
+await assertNoAssignedWorkPending(octokit, contributorUsername);
+const generated = await generateProposal({ ... });
+await assertProposalIsDifferent(comments, generated.rootCause);  // depends on `generated`
+```
+
+**Resources:**
+- [Anthropic API Docs](https://docs.anthropic.com/)
+
+---
+
 ## Phase 4: Scheduling & Reliability
 
 ### 4.1 Dynamic Scheduling with setTimeout
 
-This project does NOT use `node-cron` or `setInterval` for the poller. It uses recursive `setTimeout` with a dynamic interval.
+This project does NOT use `node-cron` or `setInterval` anywhere. There is exactly **one** independently-timed loop — the Events Poller — built with recursive `setTimeout` and a dynamic interval.
 
-**Why?** The poll interval changes based on GitHub's `X-Poll-Interval` response header. `setInterval` has a fixed interval that can't be changed after creation.
+**Why recursive `setTimeout` instead of `setInterval`?** The poll interval changes based on GitHub's `X-Poll-Interval` response header (and backs off to 120s on a 403). `setInterval` has a fixed interval that can't be changed after creation; recursive `setTimeout` reschedules itself with whatever interval the last cycle decided on.
 
 ```typescript
-// Recursive setTimeout — each cycle schedules the next one
+// jobs/schedulers.ts — the only timer in the codebase
 async function runAndReschedule() {
   const nextIntervalSeconds = await EventsPollerService.poll();
-  // Waits exactly however long GitHub says, then runs again
+  // poll() also runs the REST sync and calls NotificationSenderService.send()
+  // inline, before returning — see below
   setTimeout(runAndReschedule, nextIntervalSeconds * 1000);
 }
 
 setTimeout(runAndReschedule, 2_000); // first run after 2s startup delay
 ```
 
-**vs setInterval (used for email sender — fixed 20s):**
+**Email sending is reactive, not on its own timer.** `EventsPollerService.poll()` calls `NotificationSenderService.send()` directly at the end of its own logic, every cycle — there's no second `setTimeout`/`setInterval` for it:
+
 ```typescript
-setInterval(async () => {
-  await NotificationSenderService.send();
-}, 20_000);
+// inside EventsPollerService.poll(), after event processing + REST sync
+await NotificationSenderService.send();
 ```
 
-**Key insight:** `setTimeout` is one-shot. `setInterval` fires repeatedly at fixed intervals. Recursive `setTimeout` gives you more control over timing between runs.
+An earlier design called for the email sender and a REST-based issue syncer to run on their own fixed timers (20s and 1min respectively). That's not what shipped — both ended up folded into the poller's single cycle. `backend/src/services/issue-syncer.service.ts` still exists as a standalone class with equivalent REST-sync logic, but it's dead code: nothing imports or calls it.
+
+**Key insight:** `setTimeout` is one-shot. `setInterval` fires repeatedly at fixed intervals. Recursive `setTimeout` gives you more control over timing between runs — and lets every other step of the cycle (REST sync, email send) just be more code inside that same function, rather than its own timer.
 
 ---
 
@@ -386,7 +421,7 @@ This project replaces Redis/BullMQ with a simple database-backed queue:
 
 | status | meaning |
 |---|---|
-| `PENDING` | Email not yet sent — will be picked up within 20s |
+| `PENDING` | Email not yet sent — picked up the next time the poller cycle runs `NotificationSenderService.send()` |
 | `SENT` | Email sent successfully |
 
 **Producer** (Events Poller):
@@ -397,7 +432,7 @@ await prisma.notificationRecord.create({
 });
 ```
 
-**Consumer** (Email Sender, runs every 20s):
+**Consumer** (`NotificationSenderService`, called reactively at the end of every poller cycle — not on its own timer):
 ```typescript
 const pending = await prisma.notificationRecord.findMany({
   where: { status: 'PENDING', deletedAt: null }
@@ -406,7 +441,7 @@ for (const record of pending) {
   await sendEmail(...);              // try
   await prisma.notificationRecord.update({ data: { status: 'SENT' } });
 }
-// On failure: status stays PENDING → retried next 20s cycle
+// On failure: status stays PENDING → retried next poller cycle
 ```
 
 **Advantages over Redis/BullMQ for this use case:**
@@ -425,7 +460,7 @@ The email sender has no maximum retry count. It retries forever until success.
 
 **How it works:**
 - Job fails → `status` stays `PENDING`, `attempts` incremented
-- Next 20s cycle: picks it up again, tries again
+- Next poller cycle (whatever the current dynamic interval is — usually ~60s): picks it up again, tries again
 - Eventually SMTP recovers → email sent → `status: SENT`
 
 **Contrast with BullMQ:**
@@ -483,25 +518,31 @@ it('GET /api/config returns config', async () => {
 
 ---
 
-### 5.3 MSW (Mock Service Worker)
+### 5.3 Mocking Octokit and Prisma with `vi.mock()`
 
-MSW intercepts HTTP requests in tests. Used to mock GitHub API responses without real API calls:
+This codebase has no MSW and no nock — neither is a dependency anywhere in `backend/package.json`. GitHub API calls are mocked by mocking the `Octokit` class itself with `vi.mock()`, and Prisma is mocked the same way:
 
 ```typescript
-import { setupServer } from 'msw/node';
-import { http, HttpResponse } from 'msw';
+// tests/unit/services/events-poller.service.test.ts (pattern, simplified)
+import { vi } from 'vitest';
 
-const server = setupServer(
-  http.get('https://api.github.com/repos/*/events', () => {
-    return HttpResponse.json([
-      { type: 'IssuesEvent', payload: { action: 'opened', issue: { ... } } }
-    ]);
-  })
-);
+vi.mock('@octokit/rest', () => ({
+  Octokit: vi.fn().mockImplementation(() => ({
+    request: vi.fn().mockResolvedValue({
+      status: 200,
+      headers: { etag: '"abc123"', 'x-poll-interval': '60' },
+      data: [
+        { type: 'IssuesEvent', payload: { action: 'opened', issue: { /* ... */ } } },
+      ],
+    }),
+  })),
+}));
 ```
 
+This is a class-level mock — no HTTP layer is involved at all, so there's nothing for MSW/nock to intercept. The same approach is used for `@prisma/client`: the Prisma client is mocked directly rather than pointed at a real or simulated database for unit tests (integration tests under `tests/integration/` do use a real SQLite test DB via `tests/helpers/db.ts`).
+
 **Resources:**
-- [MSW Docs](https://mswjs.io/docs/)
+- [Vitest Mocking Guide](https://vitest.dev/guide/mocking.html)
 
 ---
 
@@ -632,13 +673,16 @@ npm run test:coverage        # with coverage report
 
 ## Recommended Reading Order for This Codebase
 
-1. `backend/prisma/schema.prisma` — understand the two data models (Config, NotificationRecord)
+1. `backend/prisma/schema.prisma` — understand the three data models (Config, NotificationRecord, ProposalRecord)
 2. `backend/src/utils/env.ts` — what env vars are required
-3. `backend/src/jobs/schedulers.ts` — how the two schedulers start
-4. `backend/src/services/events-poller.service.ts` — the core polling logic
-5. `backend/src/services/notification-sender.service.ts` — how emails are sent and retried
-6. `backend/src/api/config.routes.ts` — start/stop and config endpoints
-7. `backend/src/api/notifications.routes.ts` — issue list and delete endpoints
-8. `backend/Dockerfile` — how the app is containerised
-9. `backend/fly.toml` — how it's deployed
-10. [ARCHITECTURE.md](ARCHITECTURE.md) — the full system design picture
+3. `backend/src/app.ts` — how the Express app, middleware, and routers are wired together
+4. `backend/src/jobs/schedulers.ts` — the single scheduler entry point (recursive `setTimeout`)
+5. `backend/src/services/events-poller.service.ts` — the core polling logic, including the inline REST sync and reactive send call
+6. `backend/src/services/notification-sender.service.ts` — how emails are sent and retried
+7. `backend/src/api/config.routes.ts` — start/stop and config endpoints
+8. `backend/src/api/notifications.routes.ts` — issue list, delete, and `trigger-update` endpoints
+9. `backend/src/api/proposals.routes.ts` — the guard-ordering pattern for `POST /api/proposals`
+10. `backend/src/services/proposal-generator.service.ts` and `proposal-guards.service.ts` — LLM call + the three guards
+11. `backend/Dockerfile` — how the app is containerised
+12. `backend/fly.toml` — how it's deployed
+13. [ARCHITECTURE.md](ARCHITECTURE.md) — the full system design picture

@@ -1,15 +1,15 @@
-# GitHub Issue Notifier
+# GitHub Issue Notifier & Auto-Proposer
 
-Monitors any GitHub repository for new issues matching a configured label and emails you immediately. Also emails you on every update to a watched issue.
+Monitors any GitHub repository for new issues matching a configured label and emails you immediately. Also emails you on every update to a watched issue, and can generate + post a contributor proposal comment via an LLM (`POST /api/proposals`).
 
-No webhooks needed. No Redis. No Docker. No auth. SQLite + SMTP only.
+No webhooks needed. No Redis. No Docker required for local dev. No auth. SQLite + SMTP (+ optional Anthropic API for proposals) only.
 
 ---
 
 ## How It Works
 
 ```
-GitHub Events API (polls every ~60s with ETag)
+GitHub Events API (polls every ~60s with ETag, dynamic interval, single scheduler)
          │
          ▼  new issue with watched label?
     Select it (max N per day, default 4)
@@ -17,11 +17,11 @@ GitHub Events API (polls every ~60s with ETag)
          ▼
    NotificationRecord saved (status: PENDING)
          │
-         ▼  Email Sender runs every 20s
-    Send email → status: SENT
+         ▼  Email send is triggered reactively, right after this same poll cycle
+    Send email → status: SENT          (not on a separate 20s timer — see ARCHITECTURE.md)
          │
-         ▼  Issue updated later?
-    hasPendingUpdate = true → update email sent
+         ▼  Issue updated later? (Events API OR direct REST sync, run every cycle)
+    hasPendingUpdate = true → update email sent next cycle
 ```
 
 ---
@@ -32,6 +32,8 @@ GitHub Events API (polls every ~60s with ETag)
 |----------|---------|---------|
 | Node.js  | v22+    | https://nodejs.org |
 | npm      | v10+    | Bundled with Node |
+
+> `backend/package.json`'s `engines.node` field says `>=24.0.0`, but `.github/workflows/ci.yml` and `backend/Dockerfile` both actually pin Node **22**. This is an unreconciled inconsistency in the current source, not enforced (no `engine-strict`) — Node 22 is what CI/Docker actually run.
 
 No Docker, no Redis, no database server required.
 
@@ -106,6 +108,12 @@ SMTP_USER=your-gmail@gmail.com
 SMTP_PASS=xxxx xxxx xxxx xxxx
 ```
 
+Optional — only needed if you want to use `POST /api/proposals`:
+```env
+ANTHROPIC_API_KEY=
+```
+Without it, the rest of the system (notifications) works normally; the proposals route returns 500 if called.
+
 ### Getting Gmail App Password
 1. Enable 2FA on your Gmail account
 2. Google Account → Security → App Passwords → create one
@@ -128,14 +136,21 @@ backend/
 ├── src/
 │   ├── api/
 │   │   ├── config.routes.ts         GET/PUT config, start/stop
-│   │   ├── notifications.routes.ts  list/delete notification records
+│   │   ├── notifications.routes.ts  list/delete/track/trigger-update notification records
+│   │   ├── proposals.routes.ts      generate (LLM) + post + list contributor proposals
 │   │   └── health.routes.ts         health checks
 │   ├── services/
-│   │   ├── events-poller.service.ts GitHub Events API + ETag polling
-│   │   ├── notification-sender.service.ts  drain pending, send emails
+│   │   ├── events-poller.service.ts GitHub Events API + ETag polling; also runs the direct
+│   │   │                            REST sync and calls the email sender inline, every cycle
+│   │   ├── notification-sender.service.ts  drain pending, send emails (called reactively,
+│   │   │                            not on its own timer — isSending lock prevents overlap)
+│   │   ├── issue-syncer.service.ts  standalone REST-sync class — DEAD CODE, never imported
+│   │   ├── proposal-generator.service.ts  LLM call (Anthropic SDK) that drafts a proposal
+│   │   ├── proposal-guards.service.ts     the 3 guards gating proposal creation
 │   │   └── email.service.ts         Nodemailer wrapper
 │   ├── jobs/
-│   │   └── schedulers.ts            two schedulers (poller + email sender)
+│   │   └── schedulers.ts            one scheduler (Events Poller, dynamic interval);
+│   │                                email send is triggered reactively inside it
 │   ├── middleware/
 │   │   ├── error.middleware.ts
 │   │   └── not-found.middleware.ts
@@ -148,7 +163,7 @@ backend/
 │   ├── app.ts                       Express setup
 │   └── server.ts                    Entry point
 ├── prisma/
-│   └── schema.prisma                Config + NotificationRecord models
+│   └── schema.prisma                Config + NotificationRecord + ProposalRecord models
 ├── Dockerfile
 ├── fly.toml                         Production deploy config
 └── .env.example
@@ -174,9 +189,19 @@ backend/
 |---|---|---|
 | `GET` | `/api/notifications` | List records (`?status=SENT&page=1&limit=20`) |
 | `GET` | `/api/notifications/:id` | Single record |
+| `POST` | `/api/notifications/track` | Manually track an issue by number |
+| `POST` | `/api/notifications/:id/trigger-update` | Manually flag for an update email (sent next poller cycle) |
 | `DELETE` | `/api/notifications/:id` | Soft delete |
 | `DELETE` | `/api/notifications/:id/hard` | Hard delete |
 | `POST` | `/api/notifications/:id/restore` | Restore soft-deleted |
+
+### Proposals
+
+| Method | Route | Description |
+|---|---|---|
+| `POST` | `/api/proposals` | Generate (LLM) and immediately post a contributor proposal comment. Requires `ANTHROPIC_API_KEY`. |
+| `GET` | `/api/proposals` | List records (`?contributorUsername=...&githubIssueNumber=...`) |
+| `GET` | `/api/proposals/:id` | Single record |
 
 ### Health
 
@@ -198,6 +223,9 @@ All set via `PUT /api/config`:
 | `watchedLabel` | `Help Wanted` | Label to filter on |
 | `issueLimit` | `4` | Max new issues selected per day |
 | `githubToken` | `null` | Optional PAT for higher rate limit |
+| `notifyStartTime` | `""` | Notify window start, `HH:MM` 24h. Empty = no filter |
+| `notifyEndTime` | `""` | Notify window end, `HH:MM` 24h. Empty = no filter |
+| `notifyTimezone` | `"UTC"` | IANA timezone for the notify window |
 
 ---
 

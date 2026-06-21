@@ -22,6 +22,8 @@ model Config {
   notifyStartTime     String   @default("")
   notifyEndTime       String   @default("")
   notifyTimezone      String   @default("UTC")
+  myGithubUsername    String   @default("")
+  autoProposal        Boolean  @default(false)
   updatedAt           DateTime @updatedAt
 }
 
@@ -42,6 +44,7 @@ model NotificationRecord {
   hasPendingUpdate  Boolean     @default(false)
   updateEmailCount  Int         @default(0)
   lastUpdateEmailAt DateTime?
+  labelDetectedAt   DateTime?
   deletedAt         DateTime?
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
@@ -51,4 +54,20 @@ enum NotifStatus {
   PENDING
   SENT
   FAILED
+}
+
+model ProposalRecord {
+  id                  String   @id @default(cuid())
+  githubIssueNumber   Int
+  repoFullName        String
+  contributorUsername String
+  rootCause           String
+  proposedChange      String
+  alternatives        String   @default("")
+  commentBody         String
+  commentUrl          String
+  commentId           Int
+  createdAt           DateTime @default(now())
+
+  @@unique([githubIssueNumber, repoFullName, contributorUsername])
 }

@@ -2,37 +2,42 @@
 
 ## Overview
 
-Every push triggers automated quality checks. Merges to `main` trigger production deployment.
+There is **one** GitHub Actions workflow for CI and **one** for deployment. Both only concern the backend — there is no frontend CI job.
 
 ```
-Developer pushes code
+Push or PR to `master`, touching backend/** or ci.yml
         │
         ▼
 ┌───────────────────────────────────────┐
-│  GitHub Actions: CI Pipeline          │
+│  GitHub Actions: CI (ci.yml)           │
+│  job "ci" — single job, no matrix      │
 │                                       │
-│  1. Lint (ESLint + Prettier)          │
-│  2. TypeScript type check             │
-│  3. Unit tests (Vitest)               │
-│  4. API integration tests             │
-│  5. Build backend                     │
-│  6. Build frontend (Next.js)          │
-│  7. [PR only] E2E tests (Playwright)  │
-│  8. Coverage report                   │
+│  1. npm ci            (working-directory: backend)
+│  2. npx prisma generate
+│  3. npm run typecheck
+│  4. npm run lint
+│  5. npm run build
 └───────────────────────────────────────┘
         │
-        │ (only on merge to main)
+        │ workflow_run trigger: fires when the CI workflow
+        │ completes on master, regardless of which event
+        │ triggered that CI run (push or PR)
         ▼
 ┌───────────────────────────────────────┐
-│  GitHub Actions: Deploy Pipeline      │
+│  GitHub Actions: Deploy (deploy.yml)  │
+│  if: workflow_run.conclusion=='success'│
 │                                       │
-│  1. Build Docker image (backend)      │
-│  2. Push image to Registry            │
-│  3. Deploy to Render.com (backend)    │
-│  4. Deploy to Vercel (frontend)       │
-│  5. Run smoke tests against prod      │
+│  1. flyctl deploy --remote-only        │
+│     --wait-timeout 120                │
+│  2. sleep 10; curl -f $PROD_API_URL/health │
 └───────────────────────────────────────┘
 ```
+
+No lint/build/test job exists for `frontend/` anywhere in `.github/workflows/`. No Redis service container, no Postgres, no E2E/Playwright job, no separate unit/integration/coverage steps — `ci.yml` runs exactly the 5 steps shown above in one job.
+
+> **Suspected bug, unconfirmed (not yet executed):** this repo is an npm-workspaces monorepo (`"workspaces": ["backend", "frontend"]` in the root `package.json`), and the lockfile lives only at the repo root — there is no `backend/package-lock.json`. `ci.yml`'s `npm ci` step runs with `working-directory: backend`, which would normally fail (`npm ci` requires a lockfile in the directory it runs from) unless npm's workspace-aware resolution handles this differently than expected. This has not been verified by actually running the workflow — flagging it here as a known risk, not a confirmed failure.
+
+> **Node version inconsistency:** `backend/package.json`'s `engines.node` field says `>=24.0.0`, but `ci.yml` and `Dockerfile` both pin Node **22**. Not enforced (no `engine-strict`), so this doesn't currently break anything, but the two declarations disagree.
 
 ---
 
@@ -45,181 +50,90 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/ci.yml'
   pull_request:
-    branches: [main, develop]
-
-env:
-  NODE_VERSION: '26'
+    branches: [master]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/ci.yml'
 
 jobs:
-  lint:
-    name: Lint & Type Check
+  ci:
+    name: Type Check, Lint & Build
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-
-  test-backend:
-    name: Backend Tests
-    runs-on: ubuntu-latest
-    services:
-      redis:
-        image: redis:7-alpine
-        ports: ['6379:6379']
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-      - run: npm ci
-      - name: Run unit tests
+    timeout-minutes: 10
+    defaults:
+      run:
         working-directory: backend
-        run: npm run test:unit
-      - name: Run API integration tests
-        working-directory: backend
-        env:
-          DATABASE_URL: "file:./test.db"
-          REDIS_URL: "redis://localhost:6379"
-          JWT_SECRET: "test-secret-min-32-chars-abcdefgh"
-          JWT_REFRESH_SECRET: "test-refresh-secret-min-32-chars"
-          ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef"
-        run: npm run test:api
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        with:
-          directory: backend/coverage
 
-  test-frontend:
-    name: Frontend Tests
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-      - run: npm ci
-      - working-directory: frontend
-        run: npm run test
 
-  build:
-    name: Build Verification
-    runs-on: ubuntu-latest
-    needs: [lint, test-backend, test-frontend]
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version: '22'
           cache: 'npm'
-      - run: npm ci
-      - run: npm run build
+          cache-dependency-path: package-lock.json
 
-  e2e:
-    name: E2E Tests
-    runs-on: ubuntu-latest
-    needs: [build]
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    services:
-      redis:
-        image: redis:7-alpine
-        ports: ['6379:6379']
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-      - run: npm ci
-      - name: Install Playwright browsers
-        working-directory: frontend
-        run: npx playwright install --with-deps chromium
-      - name: Start backend
-        working-directory: backend
-        env:
-          DATABASE_URL: "file:./e2e-test.db"
-          REDIS_URL: "redis://localhost:6379"
-          JWT_SECRET: "test-secret-min-32-chars-abcdefgh"
-          JWT_REFRESH_SECRET: "test-refresh-secret-min-32-chars"
-          ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef"
-          NODE_ENV: "test"
-        run: |
-          npm run db:push
-          npm run db:seed:test
-          npm run start &
-          sleep 5
-      - name: Start frontend
-        working-directory: frontend
-        env:
-          NEXT_PUBLIC_API_URL: "http://localhost:3001"
-        run: npm run build && npm run start &
-      - name: Wait for servers
-        run: npx wait-on http://localhost:3001/health http://localhost:3000
-      - name: Run E2E tests
-        working-directory: frontend
-        run: npm run test:e2e
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: playwright-report
-          path: frontend/playwright-report/
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
 ```
+
+Note `cache-dependency-path: package-lock.json` is relative to `working-directory: backend` — i.e. it points at a `backend/package-lock.json` that does not exist in this monorepo layout. This is the same lockfile-location concern flagged above.
 
 ### Deploy Workflow (`.github/workflows/deploy.yml`)
 
 ```yaml
-name: Deploy
+name: Deploy to Fly.io
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: [CI]
+    branches: [master]
+    types: [completed]
 
 jobs:
-  deploy-backend:
-    name: Deploy Backend to Render
+  deploy:
+    name: Deploy Backend
     runs-on: ubuntu-latest
-    steps:
-      - name: Trigger Render Deploy Hook
-        run: |
-          curl -s -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+    timeout-minutes: 15
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
-  deploy-frontend:
-    name: Deploy Frontend to Vercel
-    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '26'
-          cache: 'npm'
-      - run: npm install -g vercel@latest
-      - run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
-        working-directory: frontend
-      - run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
-        working-directory: frontend
-      - run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
-        working-directory: frontend
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  smoke-test:
-    name: Production Smoke Test
-    runs-on: ubuntu-latest
-    needs: [deploy-backend, deploy-frontend]
-    steps:
-      - name: Health check backend
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy
+        working-directory: backend
+        run: flyctl deploy --remote-only --wait-timeout 120
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Health check
         run: |
-          sleep 30  # Wait for deploy to complete
+          sleep 10
           curl -f "${{ secrets.PROD_API_URL }}/health" || exit 1
-      - name: Health check frontend
-        run: curl -f "${{ secrets.PROD_FRONTEND_URL }}" || exit 1
 ```
+
+There is no separate frontend deploy job — the deployed system is the backend only. The `frontend/` Next.js scaffold (an npm workspace member, calls a non-existent `/api/auth/login`) has no CI or deploy workflow at all.
 
 ---
 
@@ -227,157 +141,102 @@ jobs:
 
 Configure these in your repository: **Settings → Secrets and variables → Actions**
 
-| Secret Name              | Description                                      |
-|--------------------------|--------------------------------------------------|
-| `RENDER_DEPLOY_HOOK_URL` | Render deploy webhook URL (from Render dashboard)|
-| `VERCEL_TOKEN`           | Vercel personal access token                     |
-| `VERCEL_ORG_ID`          | Vercel team/org ID                               |
-| `VERCEL_PROJECT_ID`      | Vercel project ID                                |
-| `PROD_API_URL`           | Production backend URL (for smoke tests)         |
-| `PROD_FRONTEND_URL`      | Production frontend URL (for smoke tests)        |
+| Secret Name      | Description                                          |
+|-------------------|-------------------------------------------------------|
+| `FLY_API_TOKEN`   | Output of `flyctl tokens create deploy`                |
+| `PROD_API_URL`    | Production backend URL, e.g. `https://expensify-backend-dusky-summit-570.fly.dev` |
+
+That's the entire set — no Render, Vercel, or Redis secrets exist because none of those services are used.
 
 ---
 
 ## Docker Setup
 
-### `docker-compose.yml` (Local Development)
-
-```yaml
-version: '3.9'
-
-services:
-  redis:
-    image: redis:7-alpine
-    ports:
-      - '6379:6379'
-    volumes:
-      - redis-data:/data
-    restart: unless-stopped
-
-volumes:
-  redis-data:
-```
-
-### `docker-compose.prod.yml` (Production)
-
-```yaml
-version: '3.9'
-
-services:
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    ports:
-      - '3001:3001'
-    environment:
-      - NODE_ENV=production
-    env_file:
-      - ./backend/.env.production
-    restart: always
-    healthcheck:
-      test: ['CMD', 'wget', '-qO-', 'http://localhost:3001/health']
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-volumes:
-  postgres-data:
-```
-
 ### `backend/Dockerfile`
 
 ```dockerfile
-# Build stage
-FROM node:26-alpine AS builder
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+FROM node:22-alpine AS builder
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --only=production
-COPY . .
-RUN npm run build
 
-# Production stage
-FROM node:26-alpine AS runner
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+COPY package*.json ./
+COPY prisma ./prisma/
+RUN npm install
+
+COPY tsconfig*.json ./
+COPY src ./src/
+RUN npm run build && npx prisma generate
+
+# ── Stage 2: Run ──────────────────────────────────────────────────────────────
+FROM node:22-alpine AS runner
+
+RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
+ENV NODE_ENV=production
+
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/prisma ./prisma
-USER appuser
+COPY package*.json ./
+COPY prisma ./prisma/
+
+# Persistent volume mount point for SQLite file
+RUN mkdir -p /data && chown app:app /data
+
+USER app
 EXPOSE 3001
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
   CMD wget -qO- http://localhost:3001/health || exit 1
-CMD ["node", "dist/server.js"]
+
+# Push schema (idempotent — safe to run every startup), then start
+CMD ["sh", "-c", "node_modules/.bin/prisma db push --skip-generate && node dist/server.js"]
 ```
+
+Note this stage-1 `RUN npm install` (not `npm ci`) operates inside a build context scoped to `backend/` (Fly.io builds with `backend/` as the Docker build context per `fly.toml`), so it does not hit the workspace-lockfile issue that affects `ci.yml`.
+
+### `docker-compose.yml` (repo root and `backend/`, identical, no services)
+
+```yaml
+version: '3.9'
+
+# No services required — app uses SQLite only.
+# Run locally with: cd backend && npm run dev
+```
+
+There is no Redis, Postgres, or any other service in either `docker-compose.yml` — both files are effectively placeholders documenting that none are needed.
 
 ---
 
 ## Branch Strategy
 
-```
-main ─────────────────────────────────────────► production deploy
-  └── develop ─────────────────────────────────► staging (optional)
-        ├── feat/add-proposal-template
-        ├── fix/grace-period-calculation
-        └── chore/update-dependencies
-```
-
-**Rules:**
-- `main` — always deployable; protected branch
-- Direct pushes to `main` are disabled; PRs required
-- At least 1 review required to merge to `main`
-- All CI checks must pass before merge
-- Feature branches: prefix with `feat/`, `fix/`, `chore/`, `docs/`
-
----
-
-## Pre-commit Hooks (Husky)
-
-Runs automatically on `git commit`:
-
-```
-pre-commit:
-  └── lint-staged
-        ├── *.{ts,tsx} → ESLint --fix → Prettier --write
-        └── *.{json,md,yml} → Prettier --write
-
-commit-msg:
-  └── Conventional commit message format check
-      (feat: | fix: | chore: | docs: | test: | refactor:)
-```
-
-**Conventional commit examples:**
-```
-feat: add grace period enforcement to poller
-fix: prevent duplicate proposals on relabelled issues
-chore: update @octokit/rest to v21
-docs: add deployment section to README
-test: add regression test for daily limit boundary
-```
+The only branch referenced anywhere in the workflows is `master` (both `ci.yml` and `deploy.yml` trigger off it; there is no `develop` branch or `feat/`/`fix/` convention enforced anywhere in the repo). Whether `master` has GitHub branch-protection rules (required reviews, required status checks, etc.) configured is a repository setting on GitHub, not something visible in these files — not documented here because it cannot be verified from source.
 
 ---
 
 ## Dependabot
 
-Configured to auto-open PRs for dependency updates:
+`.github/dependabot.yml` (real, present in the repo):
 
 ```yaml
-# .github/dependabot.yml
 version: 2
 updates:
   - package-ecosystem: "npm"
     directory: "/backend"
     schedule:
       interval: "weekly"
+      day: "monday"
     groups:
-      dependencies:
+      backend-deps:
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
       interval: "weekly"
+      day: "monday"
+    groups:
+      frontend-deps:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -385,46 +244,41 @@ updates:
       interval: "monthly"
 ```
 
+Dependabot does track `frontend/` dependency updates even though no frontend CI job runs against them — those PRs would only get type/build verification if someone manually runs `npm run build` inside `frontend/`.
+
 ---
 
 ## Monitoring & Observability
 
 ### Structured Logging (Pino)
 
-All logs are structured JSON in production:
-```json
-{"level":30,"time":1749600000000,"service":"github-poller","msg":"Polled 12 issues","matched":3}
-{"level":50,"time":1749600001000,"service":"email","msg":"Failed to send","error":"EAUTH","userId":"usr_1"}
-```
-
-Render.com streams these logs to its dashboard automatically.
+All logs are structured JSON in production (`NODE_ENV=production`), pretty-printed in development. `flyctl logs` streams these directly — there is no separate log aggregation service configured.
 
 ### Health Endpoints
 
 ```
 GET /health       → 200 {"status":"ok","uptime":12345}
-GET /health/ready → 200 {"status":"ready","db":"connected","redis":"connected"}
+GET /health/ready → 200 {"status":"ready","db":"connected"}
               or → 503 {"status":"not ready","db":"disconnected"}
 ```
 
-### Render.com Alerting
+`fly.toml` configures an HTTP health check against `GET /health` (`interval=30s`, `timeout=10s`, `grace_period=15s`) — this is what Fly.io uses to decide whether to restart the machine.
 
-Configure Render health check alerts:
-- **Health check path:** `/health/ready`
-- **Failure threshold:** 3 consecutive failures
-- **Notification:** Email alert to `sandipanghosh64@gmail.com`
+### Uptime alerting
+
+No alerting service is configured in this repo. `Doc/DEPLOYMENT.md` suggests UptimeRobot as a free option for external uptime monitoring, but no UptimeRobot config or webhook exists in source.
 
 ---
 
 ## Cost Breakdown (Production)
 
-| Service         | Tier      | Cost/month | Notes                            |
-|-----------------|-----------|-----------|----------------------------------|
-| Render.com      | Starter   | $7        | Always-on, 512MB RAM             |
-| Neon PostgreSQL | Free      | $0        | 512MB, 1 compute unit            |
-| Upstash Redis   | Free      | $0        | 10K commands/day                 |
-| Vercel          | Hobby     | $0        | Frontend, unlimited deploys      |
-| GitHub Actions  | Free      | $0        | 2,000 min/month free for private |
-| **Total**       |           | **$7/mo** |                                  |
+Per `backend/fly.toml`: app `expensify-backend-dusky-summit-570`, region `bom`, a single `shared-cpu-1x` 256MB machine with a 1GB persistent volume.
 
-> **Free alternative:** Use Render.com Free tier ($0) — the service sleeps after 15 min of inactivity. For a background poller that runs every 5 min, this is a problem. Use the $7 Starter tier for production.
+| Service    | Tier               | Cost/month | Notes                          |
+|------------|---------------------|-----------|----------------------------------|
+| Fly.io machine | shared-cpu-1x, 256MB | ~$1.94    | Always-on (`min_machines_running = 1`) |
+| Fly.io volume  | 1GB persistent       | ~$0.15    | SQLite file storage             |
+| GitHub Actions | Free                 | $0        | 2,000 min/month free for private repos |
+| **Total**      |                      | **~$2.10/mo** |                              |
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the full deployment walkthrough.

@@ -1,25 +1,38 @@
 # Testing Strategy — Expensify Issue Notifier & Auto-Proposer
 
+> This document describes the **backend's** real, existing tests (`backend/tests/`, 14 files). There is no auth layer, no E2E suite, and no frontend test job in this project — the `frontend/` Next.js scaffold has its own `vitest`/`@testing-library/react`/Playwright dependencies installed, but they are not exercised by CI and nothing here describes them as if they run today.
+
 ## Testing Philosophy
 
-- **Test behaviour, not implementation** — tests should verify what the code does, not how
-- **Fast feedback loop** — unit tests run in milliseconds; E2E tests run in CI only
-- **Real integrations where it matters** — API tests use a real SQLite instance, not mocks
-- **Deterministic** — tests never rely on network calls to GitHub or Gmail in CI
+- **Test behaviour, not implementation** — tests verify what the code does, not how
+- **Fast feedback loop** — unit tests mock everything external and run in milliseconds
+- **Real DB for integration tests** — API tests run against a real SQLite test database, not a mock
+- **Deterministic** — no test ever makes a real network call to GitHub, Anthropic, or SMTP; everything external is mocked with `vi.mock()`
 
 ---
 
-## Test Pyramid
+## What Actually Exists
 
 ```
-         ╱─────╲
-        ╱  E2E   ╲       5–10 tests — slow, high confidence, browser-driven
-       ╱───────────╲
-      ╱  API / Integ ╲   20–40 tests — medium speed, real DB, mocked externals
-     ╱─────────────────╲
-    ╱    Unit Tests      ╲ 80–120 tests — fast, isolated, all edge cases
-   ╱──────────────────────╲
+backend/tests/
+  fixtures/github-events.ts                       shared fixtures: DEFAULT_CONFIG, REAL_ISSUES, makeNotificationRecord()
+  global-setup.ts                                  vitest globalSetup — runs once before the whole suite
+  setup.ts                                          vitest setupFiles — runs before each test file
+  helpers/db.ts                                     cleanDatabase(), seedConfig() against the real test SQLite DB
+  integration/api/config.test.ts                   GET/PUT /api/config, start/stop, status
+  integration/api/health.test.ts                    /health, /health/ready
+  integration/api/notifications.test.ts             notifications CRUD + track + trigger-update
+  performance/email-performance.test.ts             timing/throughput checks on the email send path
+  regression/README.md                              naming convention + template for future regression tests (no test files yet)
+  unit/api/health.unit.test.ts                      health route handler in isolation
+  unit/db/client.test.ts                            Prisma client singleton behaviour
+  unit/middleware/error.middleware.test.ts          Zod validation error formatting, generic 500 handler
+  unit/services/email.service.test.ts               Nodemailer wrapper
+  unit/services/events-poller.service.test.ts       Events API + ETag + window + daily-limit logic
+  unit/services/notification-sender.service.test.ts send()'s early-return guards + both send passes
 ```
+
+There are no proposal-feature tests yet (`proposal-generator.service.ts`, `proposal-guards.service.ts`, `proposals.routes.ts` are untested), and no test for `issue-syncer.service.ts` (expected — it's dead code, see [ARCHITECTURE.md](ARCHITECTURE.md)).
 
 ---
 
@@ -27,77 +40,40 @@
 
 ### 1. Unit Tests
 
-**Tool:** Vitest  
-**Location:** `backend/tests/unit/`, `frontend/tests/unit/`  
-**Speed:** < 50ms per test  
-**Coverage target:** 80%+ statement coverage
+**Tool:** Vitest
+**Location:** `backend/tests/unit/`
+**Mocking:** `vi.mock()` on the module boundary — Prisma client, `@octokit/rest`'s `Octokit` class, the email service, and the logger are all mocked directly. There is no MSW, no nock, and no `vitest-mock-extended` anywhere in `backend/package.json`.
 
-**What to unit test:**
-- Service logic (guard checks, grace period calculation, daily limit enforcement)
-- Utility functions (encryption, date helpers, label matching)
-- Middleware functions (auth validation, error handler)
-- Data transformation (GitHub API response → DB model)
-
-**What NOT to unit test:**
-- Prisma queries directly (test in integration tests)
-- Express routing (test via Supertest API tests)
-- External API calls (mock these)
-
-**Example unit test:**
+**Real example** (`tests/unit/services/notification-sender.service.test.ts`, abridged):
 
 ```typescript
-// backend/tests/unit/services/guard.service.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GuardService } from '../../../src/services/guard.service';
-import type { GithubService } from '../../../src/services/github.service';
+import { DEFAULT_CONFIG, REAL_ISSUES, makeNotificationRecord } from '../../fixtures/github-events.js';
 
-describe('GuardService.canSubmitProposal', () => {
-  let mockGithub: GithubService;
-  let guard: GuardService;
+const mockPrisma = vi.hoisted(() => ({
+  config: { findUnique: vi.fn() },
+  notificationRecord: { findMany: vi.fn(), update: vi.fn() },
+}));
+vi.mock('../../../src/db/client.js', () => ({ prisma: mockPrisma }));
 
+const mockSendIssueNotification = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('../../../src/services/email.service.js', () => ({
+  sendIssueNotification: mockSendIssueNotification,
+}));
+
+import { NotificationSenderService } from '../../../src/services/notification-sender.service.js';
+
+describe('NotificationSenderService.send()', () => {
   beforeEach(() => {
-    mockGithub = {
-      getAssignedOpenIssues: vi.fn(),
-    } as unknown as GithubService;
-    guard = new GuardService(mockGithub);
+    vi.clearAllMocks();
+    mockPrisma.config.findUnique.mockResolvedValue({ ...DEFAULT_CONFIG, isRunning: true, notificationEmail: 'you@example.com' });
+    mockPrisma.notificationRecord.findMany.mockResolvedValue([]);
   });
 
-  it('returns true when user has no assigned issues', async () => {
-    vi.mocked(mockGithub.getAssignedOpenIssues).mockResolvedValue([]);
-    expect(await guard.canSubmitProposal('user1')).toBe(true);
-  });
-
-  it('returns false when user has an active assigned issue', async () => {
-    vi.mocked(mockGithub.getAssignedOpenIssues).mockResolvedValue([{ id: 999 }]);
-    expect(await guard.canSubmitProposal('user1')).toBe(false);
-  });
-
-  it('returns false when GitHub API throws', async () => {
-    vi.mocked(mockGithub.getAssignedOpenIssues).mockRejectedValue(new Error('API error'));
-    expect(await guard.canSubmitProposal('user1')).toBe(false);
-  });
-});
-```
-
-```typescript
-// backend/tests/unit/utils/grace-period.test.ts
-import { describe, it, expect } from 'vitest';
-import { isGracePeriodPassed } from '../../../src/utils/grace-period';
-
-describe('isGracePeriodPassed', () => {
-  it('returns false for issues created less than 24 hours ago', () => {
-    const recent = new Date(Date.now() - 23 * 60 * 60 * 1000);
-    expect(isGracePeriodPassed(recent)).toBe(false);
-  });
-
-  it('returns true for issues created more than 24 hours ago', () => {
-    const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
-    expect(isGracePeriodPassed(old)).toBe(true);
-  });
-
-  it('returns false for issues created exactly 24 hours ago', () => {
-    const exact = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    expect(isGracePeriodPassed(exact)).toBe(false);
+  it('returns early when isRunning is false', async () => {
+    mockPrisma.config.findUnique.mockResolvedValue({ ...DEFAULT_CONFIG, isRunning: false });
+    await NotificationSenderService.send();
+    expect(mockSendIssueNotification).not.toHaveBeenCalled();
   });
 });
 ```
@@ -106,282 +82,168 @@ describe('isGracePeriodPassed', () => {
 
 ### 2. API / Integration Tests
 
-**Tool:** Vitest + Supertest  
-**Location:** `backend/tests/integration/`  
-**Speed:** 100ms–2s per test  
-**Coverage target:** All API endpoints covered
+**Tool:** Vitest + Supertest
+**Location:** `backend/tests/integration/api/`
+**Database:** a real SQLite test database, reset via `cleanDatabase()` (`tests/helpers/db.ts`) in `beforeEach`. Nothing here is mocked at the HTTP level — there's no GitHub or SMTP traffic in these tests at all because the routes under test (`config`, `health`, `notifications`) don't call out to either.
 
-**Characteristics:**
-- Use a **real SQLite test database** (reset between test suites)
-- External services (GitHub API, Gmail) are **mocked at the HTTP level** using `msw` (Mock Service Worker)
-- Full Express app is mounted — middleware, auth, validation all run
-
-**Setup:**
+**Real example** (`tests/integration/api/config.test.ts`, abridged):
 
 ```typescript
-// backend/tests/integration/helpers/setup.ts
-import { PrismaClient } from '@prisma/client';
-import { setupServer } from 'msw/node';
-import { githubHandlers } from '../mocks/github.handlers';
-
-export const server = setupServer(...githubHandlers);
-export const prisma = new PrismaClient({
-  datasources: { db: { url: 'file:./test.db' } },
-});
-
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
-afterEach(() => server.resetHandlers());
-afterAll(async () => {
-  server.close();
-  await prisma.$disconnect();
-});
-```
-
-**Example API test:**
-
-```typescript
-// backend/tests/integration/api/issues.test.ts
-import request from 'supertest';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { app } from '../../../src/app';
-import { prisma } from '../helpers/setup';
-import { createTestUser, getTestToken } from '../helpers/auth';
+import request from 'supertest';
+import { createApp } from '../../../src/app.js';
+import { cleanDatabase, seedConfig } from '../../helpers/db.js';
 
-describe('GET /api/issues', () => {
-  let token: string;
+const app = createApp();
 
-  beforeEach(async () => {
-    await prisma.issue.deleteMany();
-    await prisma.user.deleteMany();
-    const user = await createTestUser(prisma);
-    token = getTestToken(user.id);
-    await prisma.issue.create({
-      data: { githubIssueNumber: 1, title: 'Test Issue', url: 'https://github.com/test' },
-    });
-  });
+beforeEach(async () => {
+  await cleanDatabase();
+});
 
-  it('returns 200 with list of issues', async () => {
-    const res = await request(app)
-      .get('/api/issues')
-      .set('Authorization', `Bearer ${token}`);
-    expect(res.status).toBe(200);
-    expect(res.body.data).toHaveLength(1);
-    expect(res.body.data[0].title).toBe('Test Issue');
-  });
-
-  it('returns 401 without token', async () => {
-    const res = await request(app).get('/api/issues');
-    expect(res.status).toBe(401);
-  });
-
-  it('returns 400 with invalid pagination params', async () => {
-    const res = await request(app)
-      .get('/api/issues?page=-1')
-      .set('Authorization', `Bearer ${token}`);
-    expect(res.status).toBe(400);
+describe('GET /api/config', () => {
+  it('never exposes githubToken in the response', async () => {
+    await seedConfig({ githubToken: 'ghp_secret_token_12345' });
+    const res = await request(app).get('/api/config');
+    expect(res.body.config.githubToken).toBeUndefined();
+    expect(res.body.hasGithubToken).toBe(true);
   });
 });
 ```
+
+There is no `Authorization` header anywhere in these tests — the API has no auth layer.
 
 ---
 
-### 3. E2E Tests (End-to-End)
+### 3. Performance Tests
 
-**Tool:** Playwright  
-**Location:** `frontend/tests/e2e/`  
-**Speed:** 5–30s per test  
-**When:** Runs in CI on PR to `main`, not on every commit
+**Tool:** Vitest
+**Location:** `backend/tests/performance/email-performance.test.ts`
+**Run via:** `npm run test:performance` (separate script, not part of the default `npm run test`/`test:unit` runs)
 
-**Characteristics:**
-- Requires both backend and frontend dev servers running
-- Uses a dedicated test database seeded with test data
-- Tests critical user journeys from the browser
-
-**Test scenarios:**
-
-```typescript
-// frontend/tests/e2e/auth.spec.ts
-import { test, expect } from '@playwright/test';
-
-test('user can log in and see dashboard', async ({ page }) => {
-  await page.goto('/');
-  await page.fill('[name="email"]', 'test@example.com');
-  await page.fill('[name="password"]', 'TestPassword123!');
-  await page.click('button[type="submit"]');
-  await expect(page).toHaveURL('/dashboard');
-  await expect(page.locator('h1')).toContainText('Dashboard');
-});
-
-test('invalid credentials show error', async ({ page }) => {
-  await page.goto('/');
-  await page.fill('[name="email"]', 'wrong@example.com');
-  await page.fill('[name="password"]', 'wrongpassword');
-  await page.click('button[type="submit"]');
-  await expect(page.locator('[role="alert"]')).toContainText('Invalid credentials');
-});
-```
-
-```typescript
-// frontend/tests/e2e/config.spec.ts
-import { test, expect } from '@playwright/test';
-
-test('user can add a watched label', async ({ page }) => {
-  // Assumes already logged in (use storageState for auth)
-  await page.goto('/dashboard/config');
-  await page.fill('[placeholder="Enter label name"]', 'Help Wanted');
-  await page.click('button:text("Add Label")');
-  await expect(page.locator('.label-chip')).toContainText('Help Wanted');
-});
-```
+Checks timing/throughput characteristics of the email-sending path (e.g. parallel `Promise.all` sends completing within an expected bound), not correctness per se.
 
 ---
 
-### 4. Component Tests (Frontend)
+### 4. Regression Tests
 
-**Tool:** Vitest + @testing-library/react  
-**Location:** `frontend/tests/unit/`
+**Location:** `backend/tests/regression/`
+**Current state:** only a `README.md` describing the convention exists — no regression test files have been added yet.
+
+**Convention** (from the README):
+
+```
+backend/tests/regression/issue-NNN-short-description.test.ts
+```
+
+Where `NNN` is the GitHub issue number of the bug being guarded against.
 
 ```typescript
-// frontend/tests/unit/components/IssueCard.test.tsx
-import { render, screen } from '@testing-library/react';
-import { IssueCard } from '../../../src/components/IssueCard';
+import { describe, it, expect } from 'vitest';
 
-describe('IssueCard', () => {
-  it('renders issue title as a clickable link', () => {
-    render(<IssueCard title="Fix login bug" url="https://github.com/test/1" issueNumber={1} />);
-    const link = screen.getByRole('link', { name: 'Fix login bug' });
-    expect(link).toHaveAttribute('href', 'https://github.com/test/1');
-    expect(link).toHaveAttribute('target', '_blank');
-  });
-});
-```
-
----
-
-### 5. Regression Tests
-
-**Purpose:** Ensure previously fixed bugs do not return.
-
-Every bug fix MUST be accompanied by a test that would have caught it. Name the test file after the issue, e.g.:
-
-```
-backend/tests/regression/
-  issue-001-duplicate-notifications.test.ts
-  issue-002-grace-period-off-by-one.test.ts
-  issue-003-proposal-posted-when-guard-should-block.test.ts
-```
-
-**Template:**
-```typescript
-// regression test template
-describe('Regression: [brief description of bug]', () => {
+describe('Regression: [brief description of original bug]', () => {
   it('[what should happen that previously did not]', async () => {
-    // Reproduce the exact conditions that caused the bug
-    // Assert the correct behaviour
+    // 1. Reproduce the exact conditions that caused the bug
+    // 2. Assert the correct behaviour
   });
 });
 ```
 
 ---
 
-### 6. Code Quality (Static Analysis)
+### 5. Code Quality (Static Analysis)
 
-**ESLint** — catches JavaScript/TypeScript errors and enforces style.
+**ESLint** (flat config — `backend/eslint.config.js`, not `.eslintrc.json`):
 
-```json
-// .eslintrc.json key rules
-{
-  "rules": {
-    "no-console": "error",              // Use logger (Pino), not console
-    "@typescript-eslint/no-explicit-any": "warn",
-    "@typescript-eslint/no-unused-vars": "error",
-    "import/order": "error",            // Consistent import ordering
-    "prefer-const": "error"
+```js
+// backend/eslint.config.js (real, abridged)
+export default tseslint.config(
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  ...tseslint.configs.strictTypeChecked,
+  {
+    rules: {
+      'no-console': 'error',                 // use Pino's logger instead
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-floating-promises': 'error',
+      'prefer-const': 'error',
+    },
   }
-}
+);
 ```
 
-**Prettier** — enforces consistent code formatting.
+Run via `npm run lint` (`--max-warnings 0` in CI — see [CICD_DEVOPS.md](CICD_DEVOPS.md)).
 
-**Husky + lint-staged** — runs lint and format checks before every commit:
-```json
-// package.json lint-staged config
-{
-  "lint-staged": {
-    "*.{ts,tsx}": ["eslint --fix", "prettier --write"],
-    "*.{json,md}": ["prettier --write"]
-  }
-}
-```
+There is **no Prettier and no Husky/lint-staged** anywhere in this repo — no pre-commit hooks exist. Formatting is whatever ESLint's `prefer-const`/style rules enforce; nothing auto-formats on commit.
 
 ---
 
-### 7. Coverage Requirements
+### 6. Coverage Requirements
 
-| Layer      | Target | Tool               |
-|------------|--------|--------------------|
-| Backend services | 85% | Vitest + c8 |
-| Backend API routes | 90% | Vitest + c8 |
-| Frontend components | 70% | Vitest + c8 |
-| Overall project | 80% | Combined report |
+Real thresholds, from `backend/vitest.config.ts`:
 
-CI will **fail** if coverage drops below these thresholds.
+| Metric | Threshold |
+|---|---|
+| Statements | 80% |
+| Branches | 75% |
+| Functions | 80% |
+| Lines | 80% |
+
+Coverage provider is `@vitest/coverage-v8` (not a separate `c8` package). `src/server.ts` and `src/jobs/schedulers.ts` are excluded from coverage (entry points / the timer loop itself). Run via `npm run test:coverage`. These thresholds are configured in `vitest.config.ts` but are **not** enforced as a separate CI gate step in `ci.yml` — `ci.yml` runs `typecheck`/`lint`/`build` only, not `test` or `test:coverage` (see [CICD_DEVOPS.md](CICD_DEVOPS.md) for the exact CI step list).
+
+---
+
+## Test Scripts
+
+Real scripts from `backend/package.json`:
+
+```bash
+npm run test              # vitest run --fileParallelism=false (all tests, serialized — shared SQLite test DB)
+npm run test:unit         # vitest run tests/unit
+npm run test:api          # vitest run --fileParallelism=false tests/integration
+npm run test:performance  # vitest run tests/performance
+npm run test:watch        # vitest (watch mode)
+npm run test:coverage     # vitest run --fileParallelism=false --coverage
+```
+
+`--fileParallelism=false` is used for the full run and the API run because integration tests share one real SQLite test database — running test files in parallel would race on `cleanDatabase()`.
+
+There is no `test:e2e` script in `backend/package.json`, and no E2E test suite exists anywhere in this repo.
 
 ---
 
 ## Test Data Strategy
 
-### Development
-- `backend/prisma/seed.ts` — seeds realistic test data
-
-### Integration Tests
-- Each test suite creates its own data in a fresh test DB
-- Cleanup in `afterEach` or `beforeEach`
-
-### E2E Tests
-- Uses a dedicated `.env.test` with a test database
-- Seeded via `npm run db:seed:test` before E2E run
-
-### Sensitive Data
-- Never use real GitHub tokens, real emails, or real API keys in tests
-- Use `vitest-mock-extended` for service mocks
-- Use `msw` for HTTP-level mocking of GitHub API responses
+- **Unit tests:** fixtures from `tests/fixtures/github-events.ts` (`DEFAULT_CONFIG`, `REAL_ISSUES`, `makeNotificationRecord()`); everything external is a `vi.mock()`, no real data store involved
+- **Integration tests:** a real SQLite test database, cleaned via `cleanDatabase()` before each test; `seedConfig()` seeds a `Config` row when a test needs one
+- **Sensitive data:** no real GitHub tokens, SMTP credentials, or Anthropic keys are used in any test — fixtures use placeholder values (e.g. `ghp_secret_token_12345`)
 
 ---
 
-## Running Tests in CI
+## What CI Actually Runs
 
-```yaml
-# In CI, tests run in this order:
-1. npm run lint              # Fast, fails early
-2. npm run typecheck         # Type safety
-3. npm run test:unit         # Fast (< 30s)
-4. npm run test:api          # Medium (< 2 min)
-5. npm run build             # Verify build succeeds
-6. npm run test:e2e          # Slow — only on PRs to main
-```
+Per `.github/workflows/ci.yml` (see [CICD_DEVOPS.md](CICD_DEVOPS.md) for the full file): `npm ci` → `npx prisma generate` → `npm run typecheck` → `npm run lint` → `npm run build`. **No test step runs in CI today** — `npm run test`/`test:unit`/`test:api`/`test:coverage` are available locally but none of them are invoked by `ci.yml`. This is a gap worth flagging, not something to silently paper over.
 
 ---
 
-## Verification Checklist
+## Manual Verification Checklist
 
-Use this checklist to manually verify the application works end-to-end before a release:
+A checklist for manually verifying core behavior before a release, scoped to what's actually implemented:
 
 ```
-□ Login with valid credentials succeeds
-□ Login with invalid credentials shows error (not 500)
-□ Adding a watched label appears in the list
-□ Removing a watched label removes it from the list
-□ Setting daily limit to 0 prevents email notifications
-□ Issue poll runs and detected issues appear in dashboard
-□ Email notification is received with correct clickable link
-□ Daily limit is enforced (no email after limit reached)
-□ Grace period prevents notification for issues < 24h old
-□ Proposal is posted when Help Wanted label appears
-□ Guard service blocks proposal when user has active assignment
-□ Proposal monitor detects selection and updates status
-□ Timeline comment is posted after selection
-□ Health endpoint returns 200
-□ Unauthenticated API requests return 401
-□ Invalid JSON body returns 400 (not 500)
+□ PUT /api/config accepts valid input, rejects invalid watchedRepo/email/issueLimit
+□ POST /api/config/start fails with 400 when notificationEmail is unset
+□ GET /api/config never returns githubToken (only hasGithubToken boolean)
+□ Poller cycle creates a PENDING NotificationRecord for a new matching-label issue
+□ Daily issueLimit blocks new selections once reached (update emails still unlimited)
+□ Issues older than 7 days are skipped for new selection
+□ Notify window (notifyStartTime/notifyEndTime/notifyTimezone) holds emails until window opens
+□ NotificationSenderService sends PENDING records and marks them SENT
+□ A failed send leaves the record PENDING for retry on the next poller cycle
+□ An edited issue event updates the stored title/body and sets hasPendingUpdate
+□ POST /api/notifications/track creates a PENDING record for a manually-specified issue
+□ POST /api/notifications/:id/trigger-update sets hasPendingUpdate=true
+□ DELETE /api/notifications/:id soft-deletes; POST .../restore un-deletes
+□ POST /api/proposals runs guards before calling the LLM; a disqualifying guard prevents generation
+□ GET /health and /health/ready return correct status codes when DB is up/down
 ```

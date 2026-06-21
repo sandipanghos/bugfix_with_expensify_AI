@@ -10,6 +10,7 @@ const envSchema = z.object({
   SMTP_USER: z.string().email(),
   SMTP_PASS: z.string().min(1),
   CORS_ORIGIN: z.string().default('*'),
+  ANTHROPIC_API_KEY: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

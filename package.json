@@ -17,7 +17,8 @@
   },
   "devDependencies": {
     "concurrently": "^10.0.0",
-    "prettier": "^3.3.0"
+    "prettier": "^3.3.0",
+    "xlsx": "^0.18.5"
   },
   "overrides": {
     "glob": "^11.0.0"

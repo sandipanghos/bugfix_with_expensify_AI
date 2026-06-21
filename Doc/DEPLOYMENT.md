@@ -1,4 +1,6 @@
-# Deployment Guide — GitHub Issue Notifier
+# Deployment Guide — GitHub Issue Notifier & Auto-Proposer
+
+> This project's actual deployed instance: Fly app `expensify-backend-dusky-summit-570`, region `bom` (Mumbai) — see [backend/fly.toml](../backend/fly.toml). The steps below are a generic walkthrough for deploying your own copy under your own app name/region; substitute as needed.
 
 ## Options at a Glance
 
@@ -43,7 +45,7 @@ flyctl auth login
 cd backend
 flyctl launch --name github-issue-notifier --no-deploy
 # When asked "Would you like to copy its configuration to the new app?" → Yes
-# Region: pick closest to you (ams=Europe, sjc=US West, iad=US East, sin=Asia)
+# Region: pick closest to you (ams=Europe, sjc=US West, iad=US East, sin/bom=Asia)
 ```
 
 ### Step 2 — Create persistent volume
@@ -62,10 +64,13 @@ flyctl secrets set \
   SMTP_SECURE=false \
   SMTP_USER=your-gmail@gmail.com \
   "SMTP_PASS=xxxx xxxx xxxx xxxx"
+
+# Optional — only needed for POST /api/proposals (LLM-generated proposals)
+flyctl secrets set ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 > `fly.toml` already sets `NODE_ENV`, `PORT`, `DATABASE_URL`, and `CORS_ORIGIN`.
-> Never put SMTP credentials in `fly.toml` — that file is committed to git.
+> Never put SMTP credentials or the Anthropic key in `fly.toml` — that file is committed to git.
 
 ### Step 4 — Deploy
 
@@ -152,7 +157,8 @@ Oracle gives 2 AMD VMs (1 OCPU, 1GB RAM) that are permanently free — no credit
 # SSH in
 ssh ubuntu@<your-vm-ip>
 
-# Install Node.js 22
+# Install Node.js 22 (matches CI/Docker; package.json's engines field says >=24.0.0,
+# an unreconciled inconsistency in the current source — not enforced, Node 22 works)
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs git
 
@@ -293,3 +299,4 @@ Only 5 required. Everything else configured via `PUT /api/config` at runtime.
 | `NODE_ENV` | No | `production` (set by fly.toml) |
 | `PORT` | No | `3001` (set by fly.toml) |
 | `CORS_ORIGIN` | No | `*` (set by fly.toml) |
+| `ANTHROPIC_API_KEY` | No | `sk-ant-...` — only needed for `POST /api/proposals`; route returns 500 if missing when called |

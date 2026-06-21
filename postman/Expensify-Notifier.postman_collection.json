@@ -1,0 +1,669 @@
+{
+  "info": {
+    "_postman_id": "c7f1a2b3-d4e5-4f60-8a9b-0c1d2e3f4a5b",
+    "name": "Expensify Issue Notifier",
+    "description": "Complete API collection for the Expensify GitHub Issue Notifier backend.\n\nImport the matching environment file and set `base_url` before running.\n\nEndpoints covered:\n- Health (2)\n- Config (5)\n- Notifications (7)\n\nTotal: 14 requests",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "description": "Liveness and readiness probes.",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            },
+            "description": "Returns server uptime. Always 200 while the process is alive."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status is ok', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.status).to.eql('ok');",
+                  "  pm.expect(json.uptime).to.be.a('number');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "{{base_url}}/health" }
+              },
+              "body": "{\n  \"status\": \"ok\",\n  \"uptime\": 123.45\n}"
+            }
+          ]
+        },
+        {
+          "name": "Readiness Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health/ready",
+              "host": ["{{base_url}}"],
+              "path": ["health", "ready"]
+            },
+            "description": "Checks DB connectivity. Returns 503 if SQLite is unreachable."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('db connected', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.status).to.eql('ready');",
+                  "  pm.expect(json.db).to.eql('connected');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 Ready",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "{{base_url}}/health/ready" }
+              },
+              "body": "{\n  \"status\": \"ready\",\n  \"db\": \"connected\"\n}"
+            },
+            {
+              "name": "503 DB Disconnected",
+              "status": "Service Unavailable",
+              "code": 503,
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "{{base_url}}/health/ready" }
+              },
+              "body": "{\n  \"status\": \"not ready\",\n  \"db\": \"disconnected\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Config",
+      "description": "Manage the singleton config: watched repo, label, email, daily limit, and service on/off.",
+      "item": [
+        {
+          "name": "Get Config",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/config",
+              "host": ["{{base_url}}"],
+              "path": ["api", "config"]
+            },
+            "description": "Returns the current config. githubToken is hidden; use hasGithubToken to check presence."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('config shape', () => {",
+                  "  const { config, hasGithubToken } = pm.response.json();",
+                  "  pm.expect(config).to.have.property('watchedRepo');",
+                  "  pm.expect(config).to.have.property('isRunning');",
+                  "  pm.expect(config).to.not.have.property('githubToken');",
+                  "  pm.expect(hasGithubToken).to.be.a('boolean');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "{{base_url}}/api/config" }
+              },
+              "body": "{\n  \"config\": {\n    \"id\": \"singleton\",\n    \"notificationEmail\": \"you@example.com\",\n    \"watchedRepo\": \"Expensify/App\",\n    \"watchedLabel\": \"Help Wanted\",\n    \"issueLimit\": 4,\n    \"pollIntervalSeconds\": 60,\n    \"dailySelectedCount\": 0,\n    \"dailyResetDate\": \"2026-06-14\",\n    \"isRunning\": false\n  },\n  \"hasGithubToken\": true\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update Config",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"notificationEmail\": \"you@example.com\",\n  \"watchedRepo\": \"Expensify/App\",\n  \"watchedLabel\": \"Help Wanted\",\n  \"issueLimit\": 4,\n  \"githubToken\": \"ghp_yourTokenHere\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/config",
+              "host": ["{{base_url}}"],
+              "path": ["api", "config"]
+            },
+            "description": "Update any subset of config fields. All fields are optional.\n\nChanging `watchedRepo` resets lastEtag and dailySelectedCount.\n\nSet `githubToken` to null to clear it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('updated config returned', () => {",
+                  "  const { config } = pm.response.json();",
+                  "  pm.expect(config.watchedRepo).to.be.a('string');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 Updated",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "PUT",
+                "url": { "raw": "{{base_url}}/api/config" }
+              },
+              "body": "{\n  \"config\": {\n    \"notificationEmail\": \"you@example.com\",\n    \"watchedRepo\": \"Expensify/App\",\n    \"watchedLabel\": \"Help Wanted\",\n    \"issueLimit\": 4,\n    \"isRunning\": false\n  },\n  \"hasGithubToken\": true\n}"
+            },
+            {
+              "name": "400 Validation Error",
+              "status": "Bad Request",
+              "code": 400,
+              "originalRequest": {
+                "method": "PUT",
+                "url": { "raw": "{{base_url}}/api/config" }
+              },
+              "body": "{\n  \"error\": \"Validation failed\",\n  \"details\": [\n    {\n      \"path\": [\"notificationEmail\"],\n      \"message\": \"Invalid email\"\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/config/status",
+              "host": ["{{base_url}}"],
+              "path": ["api", "config", "status"]
+            },
+            "description": "Quick snapshot: running state, daily issue count, poll interval. Use this for dashboards."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status fields present', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json).to.have.all.keys(",
+                  "    'isRunning', 'watchedRepo', 'watchedLabel', 'issueLimit',",
+                  "    'notificationEmail', 'dailySelectedCount', 'isNewDay',",
+                  "    'pollIntervalSeconds', 'hasGithubToken'",
+                  "  );",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "{{base_url}}/api/config/status" }
+              },
+              "body": "{\n  \"isRunning\": true,\n  \"watchedRepo\": \"Expensify/App\",\n  \"watchedLabel\": \"Help Wanted\",\n  \"issueLimit\": 4,\n  \"notificationEmail\": \"you@example.com\",\n  \"dailySelectedCount\": 2,\n  \"isNewDay\": false,\n  \"pollIntervalSeconds\": 60,\n  \"hasGithubToken\": true\n}"
+            }
+          ]
+        },
+        {
+          "name": "Start Service",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/config/start",
+              "host": ["{{base_url}}"],
+              "path": ["api", "config", "start"]
+            },
+            "description": "Sets isRunning=true. Requires notificationEmail to be set first.\n\nThe two schedulers (Events Poller + Email Sender) will begin their cycles on the next tick."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('service started', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.status).to.eql('running');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 Started",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "POST",
+                "url": { "raw": "{{base_url}}/api/config/start" }
+              },
+              "body": "{\n  \"status\": \"running\",\n  \"message\": \"Notification service started\"\n}"
+            },
+            {
+              "name": "400 No Email Set",
+              "status": "Bad Request",
+              "code": 400,
+              "originalRequest": {
+                "method": "POST",
+                "url": { "raw": "{{base_url}}/api/config/start" }
+              },
+              "body": "{\n  \"error\": \"notificationEmail must be set before starting\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Stop Service",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/config/stop",
+              "host": ["{{base_url}}"],
+              "path": ["api", "config", "stop"]
+            },
+            "description": "Sets isRunning=false. The pollers will see this flag on their next cycle and skip work."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('service stopped', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.status).to.eql('stopped');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 Stopped",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "POST",
+                "url": { "raw": "{{base_url}}/api/config/stop" }
+              },
+              "body": "{\n  \"status\": \"stopped\",\n  \"message\": \"Notification service stopped\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Notifications",
+      "description": "Read and manage NotificationRecord rows (one per selected GitHub issue).",
+      "item": [
+        {
+          "name": "List Notifications",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/notifications?page=1&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "notifications"],
+              "query": [
+                { "key": "page", "value": "1", "description": "Page number (default 1)" },
+                { "key": "limit", "value": "20", "description": "Records per page (1–100, default 20)" },
+                { "key": "status", "value": "", "description": "Filter: PENDING | SENT | FAILED (omit for all)", "disabled": true },
+                { "key": "includeDeleted", "value": "false", "description": "Set true to include soft-deleted records", "disabled": true }
+              ]
+            },
+            "description": "Paginated list of all notification records, ordered newest first.\n\nThe test script auto-saves the first record's ID to the `notification_id` environment variable for use in subsequent requests."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('pagination shape', () => {",
+                  "  const { data, pagination } = pm.response.json();",
+                  "  pm.expect(data).to.be.an('array');",
+                  "  pm.expect(pagination).to.have.all.keys('page', 'limit', 'total', 'pages');",
+                  "});",
+                  "",
+                  "// Auto-save the first record ID for downstream requests",
+                  "const { data } = pm.response.json();",
+                  "if (data && data.length > 0) {",
+                  "  pm.environment.set('notification_id', data[0].id);",
+                  "  console.log('notification_id set to:', data[0].id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "{{base_url}}/api/notifications?page=1&limit=20" }
+              },
+              "body": "{\n  \"data\": [\n    {\n      \"id\": \"clx1abc123\",\n      \"githubIssueNumber\": 47,\n      \"title\": \"[Help Wanted] Fix crash on login\",\n      \"url\": \"https://github.com/Expensify/App/issues/47\",\n      \"repoFullName\": \"Expensify/App\",\n      \"matchedLabel\": \"Help Wanted\",\n      \"status\": \"SENT\",\n      \"attempts\": 1,\n      \"notifiedAt\": \"2026-06-14T10:00:00.000Z\",\n      \"hasPendingUpdate\": false,\n      \"updateEmailCount\": 0,\n      \"deletedAt\": null,\n      \"createdAt\": \"2026-06-14T10:00:00.000Z\",\n      \"updatedAt\": \"2026-06-14T10:00:00.000Z\"\n    }\n  ],\n  \"pagination\": {\n    \"page\": 1,\n    \"limit\": 20,\n    \"total\": 1,\n    \"pages\": 1\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "List — Filter by Status (PENDING)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/notifications?status=PENDING&limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["api", "notifications"],
+              "query": [
+                { "key": "status", "value": "PENDING" },
+                { "key": "limit", "value": "50" }
+              ]
+            },
+            "description": "List only PENDING records — issues waiting to have their initial email sent."
+          },
+          "response": []
+        },
+        {
+          "name": "List — Include Deleted",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/notifications?includeDeleted=true",
+              "host": ["{{base_url}}"],
+              "path": ["api", "notifications"],
+              "query": [
+                { "key": "includeDeleted", "value": "true" }
+              ]
+            },
+            "description": "Include soft-deleted records in the result set."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Single Notification",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/notifications/{{notification_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "notifications", "{{notification_id}}"]
+            },
+            "description": "Fetch a single record by ID.\n\n`notification_id` is auto-set by the \"List Notifications\" test script."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 or 404', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 404]);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "  pm.test('record returned', () => {",
+                  "    const { data } = pm.response.json();",
+                  "    pm.expect(data).to.have.property('githubIssueNumber');",
+                  "    pm.expect(data).to.have.property('status');",
+                  "  });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 Found",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "{{base_url}}/api/notifications/{{notification_id}}" }
+              },
+              "body": "{\n  \"data\": {\n    \"id\": \"clx1abc123\",\n    \"githubIssueNumber\": 47,\n    \"title\": \"[Help Wanted] Fix crash on login\",\n    \"url\": \"https://github.com/Expensify/App/issues/47\",\n    \"repoFullName\": \"Expensify/App\",\n    \"matchedLabel\": \"Help Wanted\",\n    \"status\": \"SENT\",\n    \"attempts\": 1,\n    \"notifiedAt\": \"2026-06-14T10:00:00.000Z\",\n    \"hasPendingUpdate\": false,\n    \"updateEmailCount\": 0,\n    \"deletedAt\": null\n  }\n}"
+            },
+            {
+              "name": "404 Not Found",
+              "status": "Not Found",
+              "code": 404,
+              "originalRequest": {
+                "method": "GET",
+                "url": { "raw": "{{base_url}}/api/notifications/{{notification_id}}" }
+              },
+              "body": "{\n  \"error\": \"Notification record not found\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Soft Delete Notification",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/notifications/{{notification_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "notifications", "{{notification_id}}"]
+            },
+            "description": "Sets deletedAt timestamp. Record is hidden from list by default but restorable.\n\nReturns 409 if already soft-deleted."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 or 404 or 409', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 404, 409]);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "  pm.test('deletedAt set', () => {",
+                  "    const { data } = pm.response.json();",
+                  "    pm.expect(data.deletedAt).to.not.be.null;",
+                  "  });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 Soft Deleted",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "DELETE",
+                "url": { "raw": "{{base_url}}/api/notifications/{{notification_id}}" }
+              },
+              "body": "{\n  \"data\": {\n    \"id\": \"clx1abc123\",\n    \"deletedAt\": \"2026-06-14T12:00:00.000Z\"\n  },\n  \"message\": \"Record soft-deleted\"\n}"
+            },
+            {
+              "name": "409 Already Deleted",
+              "status": "Conflict",
+              "code": 409,
+              "originalRequest": {
+                "method": "DELETE",
+                "url": { "raw": "{{base_url}}/api/notifications/{{notification_id}}" }
+              },
+              "body": "{\n  \"error\": \"Record is already soft-deleted\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Restore Notification",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/notifications/{{notification_id}}/restore",
+              "host": ["{{base_url}}"],
+              "path": ["api", "notifications", "{{notification_id}}", "restore"]
+            },
+            "description": "Clears deletedAt on a soft-deleted record. Returns 409 if not currently soft-deleted."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 or 404 or 409', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 404, 409]);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "  pm.test('deletedAt cleared', () => {",
+                  "    const { data } = pm.response.json();",
+                  "    pm.expect(data.deletedAt).to.be.null;",
+                  "  });",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 Restored",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "POST",
+                "url": { "raw": "{{base_url}}/api/notifications/{{notification_id}}/restore" }
+              },
+              "body": "{\n  \"data\": {\n    \"id\": \"clx1abc123\",\n    \"deletedAt\": null\n  },\n  \"message\": \"Record restored\"\n}"
+            },
+            {
+              "name": "409 Not Deleted",
+              "status": "Conflict",
+              "code": 409,
+              "originalRequest": {
+                "method": "POST",
+                "url": { "raw": "{{base_url}}/api/notifications/{{notification_id}}/restore" }
+              },
+              "body": "{\n  \"error\": \"Record is not soft-deleted\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Hard Delete Notification",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/notifications/{{notification_id}}/hard",
+              "host": ["{{base_url}}"],
+              "path": ["api", "notifications", "{{notification_id}}", "hard"]
+            },
+            "description": "Permanently removes the record from the database. This cannot be undone.\n\nWorks on both active and soft-deleted records."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 or 404', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 404]);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "  pm.test('deletion confirmed', () => {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.message).to.eql('Record permanently deleted');",
+                  "  });",
+                  "  pm.environment.unset('notification_id');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "response": [
+            {
+              "name": "200 Hard Deleted",
+              "status": "OK",
+              "code": 200,
+              "originalRequest": {
+                "method": "DELETE",
+                "url": { "raw": "{{base_url}}/api/notifications/{{notification_id}}/hard" }
+              },
+              "body": "{\n  \"message\": \"Record permanently deleted\"\n}"
+            },
+            {
+              "name": "404 Not Found",
+              "status": "Not Found",
+              "code": 404,
+              "originalRequest": {
+                "method": "DELETE",
+                "url": { "raw": "{{base_url}}/api/notifications/{{notification_id}}/hard" }
+              },
+              "body": "{\n  \"error\": \"Notification record not found\"\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": []
+}

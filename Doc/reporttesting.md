@@ -1,5 +1,7 @@
 # Test Report — GitHub Issue Notifier
 
+> **This is a frozen historical snapshot of one test run (2026-06-13/14), not a living document.** It predates the Proposals/Auto-Proposer feature entirely — no `ProposalRecord`, `proposal-generator.service.ts`, `proposal-guards.service.ts`, or `proposals.routes.ts` existed yet, so none of their tests appear here (none exist today either — see [TESTING_STRATEGY.md](TESTING_STRATEGY.md)). Test counts, coverage percentages, and timestamps below are exactly what that one run produced and are not re-verified or kept in sync with the current codebase. For the current, accurate description of what tests exist and how to run them, see [TESTING_STRATEGY.md](TESTING_STRATEGY.md).
+
 **Date:** 2026-06-13  
 **Branch:** master  
 **Test Email:** sandghos1987@gmail.com  
@@ -210,8 +212,11 @@ Test environment: mocked SMTP, real Prisma call logic, CPU-only overhead.
 | 5 records all failing | < 200ms | < 10ms | PASS |
 
 > **Note:** With real SMTP (Gmail), expect ~2-5 second latency per email due to
-> network round-trip. The app handles this by running the email sender async at
-> 20-second intervals — SMTP latency does not block the poller.
+> network round-trip. The app handles this by running the email sender asynchronously.
+> *(Originally written as "at 20-second intervals" — that described an earlier design.
+> The current code calls `NotificationSenderService.send()` reactively, once per poller
+> cycle, not on a separate fixed timer; see [ARCHITECTURE.md](ARCHITECTURE.md) Section 3.
+> SMTP latency still does not block the poller either way.)*
 
 ---
 

@@ -63,16 +63,21 @@ export class NotificationSenderService {
             isUpdate: false,
           });
 
+          const now = new Date();
           await prisma.notificationRecord.update({
             where: { id: record.id },
             data: {
               status: 'SENT',
-              notifiedAt: new Date(),
+              notifiedAt: now,
               attempts: { increment: 1 },
-              lastAttemptAt: new Date(),
+              lastAttemptAt: now,
             },
           });
 
+          if (record.labelDetectedAt) {
+            const lagMs = now.getTime() - record.labelDetectedAt.getTime();
+            logger.info({ issueNumber: record.githubIssueNumber, lagMs }, `Label-to-email latency: ${lagMs}ms`);
+          }
           logger.info({ issueNumber: record.githubIssueNumber }, 'Initial notification sent');
         } catch (err) {
           await prisma.notificationRecord.update({
@@ -86,6 +91,29 @@ export class NotificationSenderService {
       ...pendingUpdates.map(async (record) => {
         const updateCount = record.updateEmailCount + 1;
         try {
+          // Cap at 3 total emails (1 initial + 2 updates) when myGithubUsername is configured
+          // and no proposal from that user exists for this issue. Once a proposal is posted
+          // the check naturally falls through and update emails resume.
+          if (record.updateEmailCount >= 2 && config.myGithubUsername) {
+            const hasMyProposal = await prisma.proposalRecord.findFirst({
+              where: {
+                githubIssueNumber: record.githubIssueNumber,
+                contributorUsername: config.myGithubUsername,
+              },
+            });
+            if (!hasMyProposal) {
+              await prisma.notificationRecord.update({
+                where: { id: record.id },
+                data: { hasPendingUpdate: false },
+              });
+              logger.info(
+                { issueNumber: record.githubIssueNumber, updateEmailCount: record.updateEmailCount },
+                'Email cap reached (3 total), no proposal from myGithubUsername — skipping update email'
+              );
+              return;
+            }
+          }
+
           await sendIssueNotification({
             to: config.notificationEmail,
             issueTitle: record.title,

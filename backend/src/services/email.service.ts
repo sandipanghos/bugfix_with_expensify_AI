@@ -7,6 +7,8 @@ const transporter = nodemailer.createTransport({
   port: env.SMTP_PORT,
   secure: env.SMTP_SECURE,
   auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+  pool: true,
+  maxConnections: 1,
 });
 
 export interface IssueEmailData {
