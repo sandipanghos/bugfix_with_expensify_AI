@@ -1,16 +1,21 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [master]
     paths:
       - 'backend/**'
       - '.github/workflows/ci.yml'
+      - '.npmrc'
+      - 'package-lock.json'
   pull_request:
     branches: [master]
     paths:
       - 'backend/**'
       - '.github/workflows/ci.yml'
+      - '.npmrc'
+      - 'package-lock.json'
 
 jobs:
   ci:
