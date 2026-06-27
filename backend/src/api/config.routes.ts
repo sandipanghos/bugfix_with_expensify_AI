@@ -26,7 +26,7 @@ export function isWithinNotifyWindow(startTime: string, endTime: string, timezon
   }
 }
 
-const DEFAULT_CONFIG = {
+export const DEFAULT_CONFIG = {
   id: 'singleton',
   notificationEmail: '',
   watchedRepo: 'Expensify/App',
@@ -142,6 +142,7 @@ configRouter.get('/status', async (_req, res, next) => {
       isInNotifyWindow: isWithinNotifyWindow(config.notifyStartTime, config.notifyEndTime, config.notifyTimezone),
       myGithubUsername: config.myGithubUsername,
       autoProposal: config.autoProposal,
+      lastRestartAt: config.lastRestartAt,
     });
   } catch (err) {
     next(err);

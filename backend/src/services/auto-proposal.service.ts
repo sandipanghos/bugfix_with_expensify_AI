@@ -30,6 +30,7 @@ export class AutoProposalService {
   }
 
   private static async _run(): Promise<void> {
+    const runStart = Date.now();
     const config = await prisma.config.findUnique({ where: { id: 'singleton' } });
 
     if (!config || !config.isRunning || !config.autoProposal) return;
@@ -51,32 +52,52 @@ export class AutoProposalService {
     if (parts.length !== 2) return;
     const [owner, repo] = parts as [string, string];
 
-    const pendingRecords = await prisma.notificationRecord.findMany({
-      where: { status: 'PENDING', deletedAt: null },
-      orderBy: { createdAt: 'asc' },
-    });
+    // Candidates = brand-new issues (PENDING) + already-notified issues with a pending
+    // update (SENT + hasPendingUpdate): label change, body edit, or new comment. Updates
+    // re-trigger a proposal attempt for issues that don't yet have one (e.g. the first
+    // attempt failed, or the issue was first seen outside the daily limit window).
+    const [pendingRecords, updateRecords] = await Promise.all([
+      prisma.notificationRecord.findMany({
+        where: { status: 'PENDING', deletedAt: null },
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.notificationRecord.findMany({
+        where: { status: 'SENT', hasPendingUpdate: true, deletedAt: null },
+        orderBy: { updatedAt: 'asc' },
+      }),
+    ]);
 
-    if (pendingRecords.length === 0) return;
+    const candidates = [...pendingRecords, ...updateRecords];
+    if (candidates.length === 0) return;
 
-    // Batch-check which issues already have a proposal from myGithubUsername
+    // Skip issues that already have a proposal from myGithubUsername — one cheap local
+    // DB query avoids re-running guards (and a GitHub comments fetch) on every update poll
+    // for issues we've already proposed on (the unique constraint allows only one anyway).
     const existingProposals = await prisma.proposalRecord.findMany({
       where: {
-        githubIssueNumber: { in: pendingRecords.map((r) => r.githubIssueNumber) },
+        githubIssueNumber: { in: candidates.map((r) => r.githubIssueNumber) },
         contributorUsername: config.myGithubUsername,
       },
       select: { githubIssueNumber: true },
     });
     const alreadyProposed = new Set(existingProposals.map((p) => p.githubIssueNumber));
 
-    const toPropose = pendingRecords.filter((r) => !alreadyProposed.has(r.githubIssueNumber));
+    // Dedup by issue number (a PENDING and SENT record can't coexist, but guard anyway)
+    const seen = new Set<number>();
+    const toPropose = candidates.filter((r) => {
+      if (alreadyProposed.has(r.githubIssueNumber) || seen.has(r.githubIssueNumber)) return false;
+      seen.add(r.githubIssueNumber);
+      return true;
+    });
     if (toPropose.length === 0) return;
 
-    const octokit = new Octokit({ auth: config.githubToken });
+    const octokit = new Octokit({ auth: config.githubToken ?? env.GITHUB_TOKEN });
 
     // Each issue is fully independent — process all in parallel
     await Promise.allSettled(
       toPropose.map(async (record) => {
         try {
+          const issueStart = Date.now();
           // Use pre-fetched data from the fast poller cache to skip a GitHub API call.
           // Falls back to a live fetch on cache miss (e.g. detected by the main Events poller).
           const cached = issueDataCache.get(record.githubIssueNumber);
@@ -94,7 +115,11 @@ export class AutoProposalService {
               repo,
               issue_number: record.githubIssueNumber,
             });
-            const issue = ghRes.data as { title: string; body?: string | null };
+            const issue = ghRes.data as { title: string; body?: string | null; state: string };
+            if (issue.state !== 'open') {
+              logger.info({ issueNumber: record.githubIssueNumber }, 'Auto-proposal skipped — issue is closed');
+              return;
+            }
             issueTitle = issue.title;
             issueBody = issue.body ?? '';
           }
@@ -126,6 +151,7 @@ export class AutoProposalService {
             issueBody,
             issueComments: comments.map((c) => c.body ?? '').filter(Boolean),
             issueUrl: record.url,
+            octokit,
           });
 
           try {
@@ -161,12 +187,12 @@ export class AutoProposalService {
               alternatives: generated.alternatives,
               commentBody: generated.commentBody,
               commentUrl: postRes.data.html_url,
-              commentId: postRes.data.id,
+              commentId: BigInt(postRes.data.id),
             },
           });
 
           logger.info(
-            { issueNumber: record.githubIssueNumber, commentUrl: postRes.data.html_url },
+            { issueNumber: record.githubIssueNumber, commentUrl: postRes.data.html_url, durationMs: Date.now() - issueStart },
             'Auto-proposal posted'
           );
         } catch (err) {
@@ -174,5 +200,7 @@ export class AutoProposalService {
         }
       })
     );
+
+    logger.info({ totalMs: Date.now() - runStart, issueCount: toPropose.length }, 'Auto-proposal run complete');
   }
 }

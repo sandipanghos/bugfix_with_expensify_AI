@@ -24,6 +24,7 @@ model Config {
   notifyTimezone      String   @default("UTC")
   myGithubUsername    String   @default("")
   autoProposal        Boolean  @default(false)
+  lastRestartAt       DateTime?
   updatedAt           DateTime @updatedAt
 }
 
@@ -66,7 +67,7 @@ model ProposalRecord {
   alternatives        String   @default("")
   commentBody         String
   commentUrl          String
-  commentId           Int
+  commentId           BigInt
   createdAt           DateTime @default(now())
 
   @@unique([githubIssueNumber, repoFullName, contributorUsername])

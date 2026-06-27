@@ -84,7 +84,7 @@ export async function assertNoAssignedWorkPending(
   contributorUsername: string
 ): Promise<void> {
   const res = await octokit.request('GET /search/issues', {
-    q: `assignee:${contributorUsername} state:open`,
+    q: `is:issue assignee:${contributorUsername} state:open`,
     per_page: 5,
   });
 
@@ -121,7 +121,7 @@ function extractRootCause(commentBody: string): string | null {
   const match = commentBody.match(
     /###\s*What is the root cause[^\n]*\n+([\s\S]*?)(\n###|\n##|$)/i
   );
-  return match ? match[1].trim() : null;
+  return match?.[1]?.trim() ?? null;
 }
 
 function jaccardSimilarity(a: string, b: string): number {

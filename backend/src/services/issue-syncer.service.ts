@@ -8,6 +8,7 @@ import { logger } from '../utils/logger.js';
 
 export class IssueSyncerService {
   static async sync(): Promise<boolean> {
+    const syncStart = Date.now();
     const config = await prisma.config.findUnique({ where: { id: 'singleton' } });
     if (!config || !config.isRunning) return false;
 
@@ -40,7 +41,17 @@ export class IssueSyncerService {
             { owner, repo, issue_number: record.githubIssueNumber }
           );
 
-          const issue = ghRes.data as { title: string; body?: string | null };
+          const issue = ghRes.data as { title: string; body?: string | null; state: string };
+
+          if (issue.state !== 'open') {
+            await prisma.notificationRecord.update({
+              where: { id: record.id },
+              data: { deletedAt: new Date() },
+            });
+            logger.info({ issueNumber: record.githubIssueNumber }, 'Issue is closed — soft-deleted notification record');
+            return;
+          }
+
           const newTitle = issue.title;
           const newBody = issue.body ?? '';
 
@@ -81,6 +92,7 @@ export class IssueSyncerService {
       })
     );
 
+    logger.info({ totalMs: Date.now() - syncStart, issueCount: records.length, hasChanges }, 'Issue syncer complete');
     return hasChanges;
   }
 }

@@ -49,9 +49,9 @@ proposalsRouter.post('/', async (req, res, next) => {
     const repoFullName = `${owner}/${repo}`;
 
     const config = await prisma.config.findUnique({ where: { id: 'singleton' } });
-    const octokit = new Octokit({ auth: config?.githubToken ?? undefined });
+    const octokit = new Octokit({ auth: config?.githubToken ?? env.GITHUB_TOKEN });
 
-    let issue: { title: string; body?: string | null };
+    let issue: { title: string; body?: string | null; state: string };
     try {
       const ghRes = await octokit.request('GET /repos/{owner}/{repo}/issues/{issue_number}', {
         owner,
@@ -65,6 +65,11 @@ proposalsRouter.post('/', async (req, res, next) => {
         return;
       }
       throw err;
+    }
+
+    if (issue.state !== 'open') {
+      res.status(422).json({ error: `Issue #${issueNumber} is closed — proposals can only be posted on open issues` });
+      return;
     }
 
     const comments = await listIssueComments(octokit, owner, repo, issueNumber);
@@ -88,6 +93,7 @@ proposalsRouter.post('/', async (req, res, next) => {
       issueBody: issue.body ?? '',
       issueComments: comments.map((c) => c.body ?? '').filter(Boolean),
       issueUrl,
+      octokit,
     });
 
     // This guard depends on the generated root cause, so it runs after generation.
@@ -117,7 +123,7 @@ proposalsRouter.post('/', async (req, res, next) => {
         alternatives: generated.alternatives,
         commentBody,
         commentUrl: postRes.data.html_url,
-        commentId: postRes.data.id,
+        commentId: BigInt(postRes.data.id),
       },
     });
 

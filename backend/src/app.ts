@@ -27,6 +27,11 @@ export function createApp() {
   app.use('/api', limiter);
 
   app.use(express.json({ limit: '10kb' }));
+  // BigInt values (e.g. GitHub comment IDs) can't be JSON-serialized natively.
+  // Express uses this replacer in every res.json() call.
+  app.set('json replacer', (_key: string, value: unknown) =>
+    typeof value === 'bigint' ? Number(value) : value,
+  );
 
   app.use((req, _res, next) => {
     logger.info({ method: req.method, url: req.url }, 'Request');
