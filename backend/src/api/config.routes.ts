@@ -29,7 +29,7 @@ export function isWithinNotifyWindow(startTime: string, endTime: string, timezon
 export const DEFAULT_CONFIG = {
   id: 'singleton',
   notificationEmail: '',
-  watchedRepo: 'Expensify/App',
+  watchedRepo: 'sandipanghos/App',
   watchedLabel: 'Help Wanted',
   issueLimit: 4,
   githubToken: null,

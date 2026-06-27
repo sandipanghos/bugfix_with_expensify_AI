@@ -8,7 +8,7 @@ async function main() {
     update: {},
     create: {
       notificationEmail: 'you@example.com',
-      watchedRepo: 'Expensify/App',
+      watchedRepo: 'sandipanghos/App',
       watchedLabel: 'Help Wanted',
       issueLimit: 4,
       isRunning: false,

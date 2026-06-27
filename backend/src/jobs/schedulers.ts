@@ -23,20 +23,20 @@ function startFastPoller(): void {
       const hasNew = await EventsPollerService.fastPoll();
       if (hasNew) {
         NotificationSenderService.send().catch((err) =>
-          logger.error(err, 'Email send after fast poller failed')
+          logger.error(err, 'Email send after fast poller failed'),
         );
         AutoProposalService.run().catch((err) =>
-          logger.error(err, 'Auto-proposal after fast poller failed')
+          logger.error(err, 'Auto-proposal after fast poller failed'),
         );
       }
     } catch (err) {
       logger.error(err, 'Unhandled error in fast poller');
     }
-    fastPollerTimer = setTimeout(runAndReschedule, FAST_POLL_MS);
+    fastPollerTimer = setTimeout(() => void runAndReschedule(), FAST_POLL_MS);
   }
 
   // Stagger first run so fast poller and full scan don't fire simultaneously at startup.
-  fastPollerTimer = setTimeout(runAndReschedule, 2_000);
+  fastPollerTimer = setTimeout(() => void runAndReschedule(), 2_000);
 }
 
 // Full snapshot scan every 60s using GET /repos/issues?labels=...&state=open (no `since` filter).
@@ -57,11 +57,11 @@ function startFullScanner(): void {
     } catch (err) {
       logger.error(err, 'Unhandled error in full scan');
     }
-    fullScanTimer = setTimeout(runAndReschedule, FULL_SCAN_MS);
+    fullScanTimer = setTimeout(() => void runAndReschedule(), FULL_SCAN_MS);
   }
 
   // First full scan runs 10s after startup (after fast poller has had a few cycles).
-  fullScanTimer = setTimeout(runAndReschedule, 10_000);
+  fullScanTimer = setTimeout(() => void runAndReschedule(), 10_000);
 }
 
 export function stopSchedulers(): void {

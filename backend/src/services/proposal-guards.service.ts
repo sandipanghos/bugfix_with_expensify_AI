@@ -58,6 +58,8 @@ export async function assertNoExistingProposal(
 
 // Guard: the new proposal must differ meaningfully from existing proposals
 // already posted on the issue (by anyone), based on root-cause text overlap.
+// Kept async for a uniform Promise<void> guard interface even though the body is sync.
+// eslint-disable-next-line @typescript-eslint/require-await
 export async function assertProposalIsDifferent(
   comments: IssueComment[],
   newRootCause: string

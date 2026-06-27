@@ -1,16 +1,21 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [master]
     paths:
       - 'backend/**'
       - '.github/workflows/ci.yml'
+      - '.npmrc'
+      - 'package-lock.json'
   pull_request:
     branches: [master]
     paths:
       - 'backend/**'
       - '.github/workflows/ci.yml'
+      - '.npmrc'
+      - 'package-lock.json'
 
 jobs:
   ci:
@@ -44,3 +49,32 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  deploy:
+    name: Deploy Backend (Fly.io)
+    needs: ci
+    # Deploy only after CI passes, only for master pushes (and manual dispatch).
+    # Never on pull requests. Independent of the repo default branch.
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy
+        working-directory: backend
+        run: flyctl deploy --remote-only --wait-timeout 120
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Health check
+        run: |
+          sleep 10
+          curl -f "${{ secrets.PROD_API_URL }}/health" || exit 1
+

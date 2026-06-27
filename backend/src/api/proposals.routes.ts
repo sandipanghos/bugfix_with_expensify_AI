@@ -58,7 +58,7 @@ proposalsRouter.post('/', async (req, res, next) => {
         repo,
         issue_number: issueNumber,
       });
-      issue = ghRes.data as typeof issue;
+      issue = ghRes.data;
     } catch (err: unknown) {
       if ((err as { status?: number }).status === 404) {
         res.status(404).json({ error: `Issue #${issueNumber} not found in ${repoFullName}` });

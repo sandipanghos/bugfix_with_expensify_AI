@@ -10,7 +10,7 @@ datasource db {
 model Config {
   id                  String   @id @default("singleton")
   notificationEmail   String   @default("")
-  watchedRepo         String   @default("Expensify/App")
+  watchedRepo         String   @default("sandipanghos/App")
   watchedLabel        String   @default("Help Wanted")
   issueLimit          Int      @default(4)
   githubToken         String?
