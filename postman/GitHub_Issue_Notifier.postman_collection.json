@@ -76,6 +76,43 @@
       "item": [
         {
           "name": "Get Config",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('config + hasGithubToken present', () => {",
+                  "  pm.expect(body).to.have.property('config');",
+                  "  pm.expect(body).to.have.property('hasGithubToken');",
+                  "  pm.expect(body.hasGithubToken).to.be.a('boolean');",
+                  "});",
+                  "pm.test('config schema', () => {",
+                  "  const c = body.config;",
+                  "  pm.expect(c.notificationEmail).to.be.a('string');",
+                  "  pm.expect(c.watchedRepo).to.be.a('string');",
+                  "  pm.expect(c.watchedLabel).to.be.a('string');",
+                  "  pm.expect(c.issueLimit).to.be.a('number');",
+                  "  pm.expect(c.isRunning).to.be.a('boolean');",
+                  "  pm.expect(c.notifyStartTime).to.be.a('string');",
+                  "  pm.expect(c.notifyEndTime).to.be.a('string');",
+                  "  pm.expect(c.notifyTimezone).to.be.a('string');",
+                  "  pm.expect(c.myGithubUsername).to.be.a('string');",
+                  "  pm.expect(c.autoProposal).to.be.a('boolean');",
+                  "  pm.expect(c.dailyResetDate).to.be.a('string');",
+                  "  pm.expect(c).to.have.property('lastRestartAt');",
+                  "  pm.expect(c.updatedAt, 'updatedAt is ISO datetime').to.match(/^\\d{4}-\\d{2}-\\d{2}T/);",
+                  "});",
+                  "pm.test('githubToken/lastEtag never exposed', () => {",
+                  "  pm.expect(body.config).to.not.have.property('githubToken');",
+                  "  pm.expect(body.config).to.not.have.property('lastEtag');",
+                  "});"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "header": [],
@@ -92,12 +129,43 @@
               "status": "OK",
               "code": 200,
               "header": [{ "key": "Content-Type", "value": "application/json" }],
-              "body": "{\n  \"config\": {\n    \"id\": \"singleton\",\n    \"notificationEmail\": \"you@example.com\",\n    \"watchedRepo\": \"Expensify/App\",\n    \"watchedLabel\": \"Help Wanted\",\n    \"issueLimit\": 4,\n    \"pollIntervalSeconds\": 60,\n    \"dailySelectedCount\": 2,\n    \"dailyResetDate\": \"2025-02-15\",\n    \"isRunning\": true,\n    \"notifyStartTime\": \"09:00\",\n    \"notifyEndTime\": \"18:00\",\n    \"notifyTimezone\": \"Asia/Kolkata\",\n    \"updatedAt\": \"2025-02-15T09:00:00.000Z\"\n  },\n  \"hasGithubToken\": true\n}"
+              "body": "{\n  \"config\": {\n    \"id\": \"singleton\",\n    \"notificationEmail\": \"you@example.com\",\n    \"watchedRepo\": \"Expensify/App\",\n    \"watchedLabel\": \"Help Wanted\",\n    \"issueLimit\": 4,\n    \"pollIntervalSeconds\": 60,\n    \"dailySelectedCount\": 2,\n    \"dailyResetDate\": \"2026-06-28\",\n    \"isRunning\": true,\n    \"notifyStartTime\": \"09:00\",\n    \"notifyEndTime\": \"18:00\",\n    \"notifyTimezone\": \"Asia/Kolkata\",\n    \"myGithubUsername\": \"octocat\",\n    \"autoProposal\": false,\n    \"lastRestartAt\": \"2026-06-28T03:00:00.000Z\",\n    \"updatedAt\": \"2026-06-28T09:00:00.000Z\"\n  },\n  \"hasGithubToken\": true\n}"
             }
           ]
         },
         {
           "name": "Update Config",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('returns updated config schema', () => {",
+                  "  const c = body.config;",
+                  "  pm.expect(c).to.be.an('object');",
+                  "  pm.expect(c.watchedRepo).to.be.a('string');",
+                  "  pm.expect(c.watchedLabel).to.be.a('string');",
+                  "  pm.expect(c.issueLimit).to.be.a('number');",
+                  "  pm.expect(c.notifyStartTime).to.be.a('string');",
+                  "  pm.expect(c.notifyEndTime).to.be.a('string');",
+                  "  pm.expect(c.notifyTimezone).to.be.a('string');",
+                  "  pm.expect(c.myGithubUsername).to.be.a('string');",
+                  "  pm.expect(c.autoProposal).to.be.a('boolean');",
+                  "  pm.expect(c.dailyResetDate).to.be.a('string');",
+                  "  pm.expect(c).to.have.property('lastRestartAt');",
+                  "  pm.expect(c.updatedAt, 'updatedAt is ISO datetime').to.match(/^\\d{4}-\\d{2}-\\d{2}T/);",
+                  "});",
+                  "pm.test('githubToken/lastEtag never exposed', () => {",
+                  "  pm.expect(body.config).to.not.have.property('githubToken');",
+                  "  pm.expect(body.config).to.not.have.property('lastEtag');",
+                  "});"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "PUT",
             "header": [
@@ -105,7 +173,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"notificationEmail\": \"{{notification_email}}\",\n  \"watchedRepo\": \"{{watched_repo}}\",\n  \"watchedLabel\": \"{{watched_label}}\",\n  \"issueLimit\": 4,\n  \"githubToken\": \"{{github_token}}\",\n  \"notifyStartTime\": \"{{notify_start_time}}\",\n  \"notifyEndTime\": \"{{notify_end_time}}\",\n  \"notifyTimezone\": \"{{notify_timezone}}\"\n}",
+              "raw": "{\n  \"notificationEmail\": \"{{notification_email}}\",\n  \"watchedRepo\": \"{{watched_repo}}\",\n  \"watchedLabel\": \"{{watched_label}}\",\n  \"issueLimit\": 4,\n  \"githubToken\": \"{{github_token}}\",\n  \"notifyStartTime\": \"{{notify_start_time}}\",\n  \"notifyEndTime\": \"{{notify_end_time}}\",\n  \"notifyTimezone\": \"{{notify_timezone}}\",\n  \"myGithubUsername\": \"{{my_github_username}}\",\n  \"autoProposal\": false\n}",
               "options": { "raw": { "language": "json" } }
             },
             "url": {
@@ -113,7 +181,7 @@
               "host": ["{{base_url}}"],
               "path": ["api", "config"]
             },
-            "description": "Partial update — only send fields you want to change.\n\n**Field rules:**\n- `notificationEmail` — valid email\n- `watchedRepo` — must be `owner/repo` format\n- `watchedLabel` — non-empty string\n- `issueLimit` — integer 1–100\n- `githubToken` — non-empty string or `null` (set to null to remove)\n- `notifyStartTime` — `HH:MM` (00:00–23:59) or `\"\"` to clear\n- `notifyEndTime` — `HH:MM` (00:00–23:59) or `\"\"` to clear\n- `notifyTimezone` — valid IANA timezone (e.g. `UTC`, `Asia/Kolkata`, `America/New_York`)\n\n**Side effects:**\n- Changing `watchedRepo` resets `lastEtag`, `dailySelectedCount`, and `dailyResetDate`\n- Setting `notifyStartTime` or `notifyEndTime` to `\"\"` disables the window filter entirely\n\n**Notify window behaviour:**\nWhen both start and end are set, GitHub events that arrive outside the window are permanently consumed (ETag saved first) and no notification record is created. Events are skipped — not held for later."
+            "description": "Partial update — only send fields you want to change. All fields are optional.\n\n**Field rules:**\n- `notificationEmail` — valid email\n- `watchedRepo` — must be `owner/repo` format\n- `watchedLabel` — non-empty string\n- `issueLimit` — integer 1–100\n- `githubToken` — non-empty string or `null` (set to null to remove)\n- `notifyStartTime` — `HH:MM` (00:00–23:59) or `\"\"` to clear\n- `notifyEndTime` — `HH:MM` (00:00–23:59) or `\"\"` to clear\n- `notifyTimezone` — valid IANA timezone (e.g. `UTC`, `Asia/Kolkata`, `America/New_York`)\n- `myGithubUsername` — your GitHub username, used to attribute auto-generated proposals (string, may be empty)\n- `autoProposal` — boolean; when `true`, the service automatically drafts and posts a proposal for newly selected issues\n\n**Side effects:**\n- Changing `watchedRepo` resets `lastEtag`, `dailySelectedCount`, and `dailyResetDate`\n- Setting `notifyStartTime` or `notifyEndTime` to `\"\"` disables the window filter entirely\n\n**Notify window behaviour:**\nWhen both start and end are set, GitHub events that arrive outside the window are permanently consumed (ETag saved first) and no notification record is created. Events are skipped — not held for later."
           },
           "response": [
             {
@@ -121,7 +189,7 @@
               "status": "OK",
               "code": 200,
               "header": [{ "key": "Content-Type", "value": "application/json" }],
-              "body": "{\n  \"config\": {\n    \"id\": \"singleton\",\n    \"notificationEmail\": \"you@example.com\",\n    \"watchedRepo\": \"Expensify/App\",\n    \"watchedLabel\": \"Help Wanted\",\n    \"issueLimit\": 4,\n    \"pollIntervalSeconds\": 60,\n    \"dailySelectedCount\": 0,\n    \"dailyResetDate\": \"\",\n    \"isRunning\": false,\n    \"notifyStartTime\": \"09:00\",\n    \"notifyEndTime\": \"18:00\",\n    \"notifyTimezone\": \"Asia/Kolkata\",\n    \"updatedAt\": \"2025-02-15T09:00:00.000Z\"\n  },\n  \"hasGithubToken\": true\n}"
+              "body": "{\n  \"config\": {\n    \"id\": \"singleton\",\n    \"notificationEmail\": \"you@example.com\",\n    \"watchedRepo\": \"Expensify/App\",\n    \"watchedLabel\": \"Help Wanted\",\n    \"issueLimit\": 4,\n    \"pollIntervalSeconds\": 60,\n    \"dailySelectedCount\": 2,\n    \"dailyResetDate\": \"2026-06-28\",\n    \"isRunning\": true,\n    \"notifyStartTime\": \"09:00\",\n    \"notifyEndTime\": \"18:00\",\n    \"notifyTimezone\": \"Asia/Kolkata\",\n    \"myGithubUsername\": \"octocat\",\n    \"autoProposal\": false,\n    \"lastRestartAt\": \"2026-06-28T03:00:00.000Z\",\n    \"updatedAt\": \"2026-06-28T09:15:00.000Z\"\n  },\n  \"hasGithubToken\": true\n}"
             },
             {
               "name": "400 Validation Error",
@@ -157,7 +225,7 @@
               "status": "OK",
               "code": 200,
               "header": [{ "key": "Content-Type", "value": "application/json" }],
-              "body": "{\n  \"config\": {\n    \"id\": \"singleton\",\n    \"notifyStartTime\": \"09:00\",\n    \"notifyEndTime\": \"18:00\",\n    \"notifyTimezone\": \"Asia/Kolkata\",\n    \"isRunning\": true,\n    \"updatedAt\": \"2025-02-15T03:30:00.000Z\"\n  },\n  \"hasGithubToken\": true\n}"
+              "body": "{\n  \"config\": {\n    \"id\": \"singleton\",\n    \"notifyStartTime\": \"09:00\",\n    \"notifyEndTime\": \"18:00\",\n    \"notifyTimezone\": \"Asia/Kolkata\",\n    \"isRunning\": true,\n    \"updatedAt\": \"2026-06-28T03:30:00.000Z\"\n  },\n  \"hasGithubToken\": true\n}"
             },
             {
               "name": "400 Invalid timezone",
@@ -200,12 +268,37 @@
               "status": "OK",
               "code": 200,
               "header": [{ "key": "Content-Type", "value": "application/json" }],
-              "body": "{\n  \"config\": {\n    \"id\": \"singleton\",\n    \"notifyStartTime\": \"\",\n    \"notifyEndTime\": \"\",\n    \"notifyTimezone\": \"UTC\",\n    \"isRunning\": true,\n    \"updatedAt\": \"2025-02-15T09:00:00.000Z\"\n  },\n  \"hasGithubToken\": true\n}"
+              "body": "{\n  \"config\": {\n    \"id\": \"singleton\",\n    \"notifyStartTime\": \"\",\n    \"notifyEndTime\": \"\",\n    \"notifyTimezone\": \"UTC\",\n    \"isRunning\": true,\n    \"updatedAt\": \"2026-06-28T09:00:00.000Z\"\n  },\n  \"hasGithubToken\": true\n}"
             }
           ]
         },
         {
           "name": "Get Service Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('status schema', () => {",
+                  "  pm.expect(body.isRunning).to.be.a('boolean');",
+                  "  pm.expect(body.watchedRepo).to.be.a('string');",
+                  "  pm.expect(body.watchedLabel).to.be.a('string');",
+                  "  pm.expect(body.issueLimit).to.be.a('number');",
+                  "  pm.expect(body.dailySelectedCount).to.be.a('number');",
+                  "  pm.expect(body.isNewDay).to.be.a('boolean');",
+                  "  pm.expect(body.pollIntervalSeconds).to.be.a('number');",
+                  "  pm.expect(body.hasGithubToken).to.be.a('boolean');",
+                  "  pm.expect(body.isInNotifyWindow).to.be.a('boolean');",
+                  "  pm.expect(body.myGithubUsername).to.be.a('string');",
+                  "  pm.expect(body.autoProposal).to.be.a('boolean');",
+                  "});"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "header": [],
@@ -222,7 +315,7 @@
               "status": "OK",
               "code": 200,
               "header": [{ "key": "Content-Type", "value": "application/json" }],
-              "body": "{\n  \"isRunning\": true,\n  \"watchedRepo\": \"Expensify/App\",\n  \"watchedLabel\": \"Help Wanted\",\n  \"issueLimit\": 4,\n  \"notificationEmail\": \"you@example.com\",\n  \"dailySelectedCount\": 2,\n  \"isNewDay\": false,\n  \"pollIntervalSeconds\": 60,\n  \"hasGithubToken\": true,\n  \"notifyStartTime\": \"09:00\",\n  \"notifyEndTime\": \"18:00\",\n  \"notifyTimezone\": \"Asia/Kolkata\",\n  \"isInNotifyWindow\": true\n}"
+              "body": "{\n  \"isRunning\": true,\n  \"watchedRepo\": \"Expensify/App\",\n  \"watchedLabel\": \"Help Wanted\",\n  \"issueLimit\": 4,\n  \"notificationEmail\": \"you@example.com\",\n  \"dailySelectedCount\": 2,\n  \"isNewDay\": false,\n  \"pollIntervalSeconds\": 60,\n  \"hasGithubToken\": true,\n  \"notifyStartTime\": \"09:00\",\n  \"notifyEndTime\": \"18:00\",\n  \"notifyTimezone\": \"Asia/Kolkata\",\n  \"isInNotifyWindow\": true,\n  \"myGithubUsername\": \"octocat\",\n  \"autoProposal\": false,\n  \"lastRestartAt\": \"2026-06-28T03:00:00.000Z\"\n}"
             }
           ]
         },
