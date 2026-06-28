@@ -21,6 +21,8 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY package*.json ./
 COPY prisma ./prisma/
+# Runtime asset: the proposal generator reads this at /app/ROOT_CAUSE_PROMPT_TEMPLATE.md
+COPY ROOT_CAUSE_PROMPT_TEMPLATE.md ./
 
 # Persistent volume mount point for SQLite file
 RUN mkdir -p /data && chown app:app /data
