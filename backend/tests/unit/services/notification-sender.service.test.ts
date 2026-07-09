@@ -10,6 +10,9 @@ const mockPrisma = vi.hoisted(() => ({
     findMany: vi.fn(),
     update: vi.fn(),
   },
+  proposalRecord: {
+    findFirst: vi.fn(),
+  },
 }));
 
 vi.mock('../../../src/db/client.js', () => ({ prisma: mockPrisma }));
@@ -35,6 +38,8 @@ describe('NotificationSenderService.send()', () => {
     mockPrisma.config.findUnique.mockResolvedValue(RUNNING_CONFIG);
     mockPrisma.notificationRecord.findMany.mockResolvedValue([]);
     mockPrisma.notificationRecord.update.mockResolvedValue({});
+    // Default: a proposal comment exists, so update notifications are allowed to go out.
+    mockPrisma.proposalRecord.findFirst.mockResolvedValue({ id: 'proposal-1' });
   });
 
   // ─── Early-return guards ──────────────────────────────────────────────────
@@ -221,6 +226,31 @@ describe('NotificationSenderService.send()', () => {
       (c) => c[0].data.hasPendingUpdate === false
     );
     expect(falseUpdate).toBeUndefined();
+  });
+
+  it('does NOT send an update email when the issue has no proposal comment', async () => {
+    const record = makeNotificationRecord(REAL_ISSUES[0], {
+      status: 'SENT',
+      hasPendingUpdate: true,
+      updateEmailCount: 0,
+    });
+    mockPrisma.notificationRecord.findMany.mockImplementation(({ where }) => {
+      if (where.status === 'SENT' && where.hasPendingUpdate === true) return Promise.resolve([record]);
+      return Promise.resolve([]);
+    });
+    // No proposal comment posted for this issue.
+    mockPrisma.proposalRecord.findFirst.mockResolvedValue(null);
+
+    await NotificationSenderService.send();
+
+    expect(mockSendIssueNotification).not.toHaveBeenCalled();
+    // The pending-update flag is cleared so we don't re-check it every cycle.
+    expect(mockPrisma.notificationRecord.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: record.id },
+        data: { hasPendingUpdate: false },
+      })
+    );
   });
 
   it('uses correct updateCount (updateEmailCount + 1) for update subject', async () => {

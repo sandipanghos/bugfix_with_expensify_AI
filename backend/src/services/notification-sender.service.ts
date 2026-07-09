@@ -3,10 +3,6 @@ import { logger } from '../utils/logger.js';
 import { sendIssueNotification } from './email.service.js';
 import { isWithinNotifyWindow } from '../api/config.routes.js';
 
-// Update emails are capped at this many per issue ONLY while no proposal has been posted
-// for the issue. Once a proposal exists, update emails resume with no limit.
-const MAX_UPDATE_EMAILS_WITHOUT_PROPOSAL = 3;
-
 export class NotificationSenderService {
   // Prevents two concurrent send() calls from running the same batch in parallel,
   // which would cause duplicate update emails for the same hasPendingUpdate record.
@@ -97,26 +93,24 @@ export class NotificationSenderService {
       ...pendingUpdates.map(async (record) => {
         const updateCount = record.updateEmailCount + 1;
         try {
-          // Cap at 3 update emails ONLY while no proposal has been posted for this issue.
-          // Once a proposal exists, the cap lifts and update emails resume with no limit.
-          if (record.updateEmailCount >= MAX_UPDATE_EMAILS_WITHOUT_PROPOSAL) {
-            const hasProposal = await prisma.proposalRecord.findFirst({
-              where: {
-                githubIssueNumber: record.githubIssueNumber,
-                ...(config.myGithubUsername ? { contributorUsername: config.myGithubUsername } : {}),
-              },
+          // Update notifications only go to issues that already have a proposal comment
+          // posted. If no proposal exists for this issue, clear the flag and skip the email.
+          const hasProposal = await prisma.proposalRecord.findFirst({
+            where: {
+              githubIssueNumber: record.githubIssueNumber,
+              ...(config.myGithubUsername ? { contributorUsername: config.myGithubUsername } : {}),
+            },
+          });
+          if (!hasProposal) {
+            await prisma.notificationRecord.update({
+              where: { id: record.id },
+              data: { hasPendingUpdate: false },
             });
-            if (!hasProposal) {
-              await prisma.notificationRecord.update({
-                where: { id: record.id },
-                data: { hasPendingUpdate: false },
-              });
-              logger.info(
-                { issueNumber: record.githubIssueNumber, updateEmailCount: record.updateEmailCount },
-                `Update email cap (${MAX_UPDATE_EMAILS_WITHOUT_PROPOSAL}) reached, no proposal posted — skipping`
-              );
-              return;
-            }
+            logger.info(
+              { issueNumber: record.githubIssueNumber },
+              'Update notification skipped — no proposal comment posted for this issue'
+            );
+            return;
           }
 
           const smtpStart = Date.now();

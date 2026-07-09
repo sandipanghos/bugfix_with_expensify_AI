@@ -5,12 +5,11 @@ import { logger } from '../utils/logger.js';
 import { generateProposal } from './proposal-generator.service.js';
 import {
   assertNoExistingProposal,
-  assertCommentCountInRange,
   assertProposalIsDifferent,
   listIssueComments,
   GuardViolationError,
 } from './proposal-guards.service.js';
-import { issueDataCache } from './events-poller.service.js';
+import { issueDataCache } from './issue-poller.service.js';
 
 const CACHE_TTL_MS = 2 * 60 * 1000;
 
@@ -145,21 +144,6 @@ export class AutoProposalService {
             throw err;
           }
 
-          // Only engage with lightly-discussed issues (0–4 comments). Checked before
-          // the LLM call so out-of-range issues are skipped without incurring cost.
-          try {
-            await assertCommentCountInRange(comments);
-          } catch (err) {
-            if (err instanceof GuardViolationError) {
-              logger.info(
-                { issueNumber: record.githubIssueNumber, reason: err.message },
-                'Auto-proposal skipped — comment count out of range'
-              );
-              return;
-            }
-            throw err;
-          }
-
           const generated = await generateProposal({
             repoFullName: config.watchedRepo,
             issueNumber: record.githubIssueNumber,
@@ -171,12 +155,12 @@ export class AutoProposalService {
           });
 
           try {
-            await assertProposalIsDifferent(comments, generated.rootCause);
+            await assertProposalIsDifferent(comments, generated);
           } catch (err) {
             if (err instanceof GuardViolationError) {
               logger.info(
                 { issueNumber: record.githubIssueNumber, reason: err.message },
-                'Auto-proposal duplicate root cause — skipping'
+                'Auto-proposal near-duplicate — skipping'
               );
               return;
             }

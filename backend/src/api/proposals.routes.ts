@@ -96,9 +96,9 @@ proposalsRouter.post('/', async (req, res, next) => {
       octokit,
     });
 
-    // This guard depends on the generated root cause, so it runs after generation.
+    // This guard compares the generated proposal against existing ones, so it runs after generation.
     try {
-      await assertProposalIsDifferent(comments, generated.rootCause);
+      await assertProposalIsDifferent(comments, generated);
     } catch (err) {
       if (err instanceof GuardViolationError) {
         res.status(409).json({ error: err.message, details: err.details });

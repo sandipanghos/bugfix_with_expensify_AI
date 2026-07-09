@@ -56,46 +56,46 @@ export async function assertNoExistingProposal(
   }
 }
 
-// Auto-proposal only engages with issues that have a small amount of existing
-// discussion: at least MIN and at most MAX (beyond which the conversation has
-// likely moved on or the issue has effectively been claimed).
-export const MIN_ISSUE_COMMENTS = 0;
-export const MAX_ISSUE_COMMENTS = 4;
+// A proposal counts as a duplicate only when it is essentially identical to one
+// already posted on the issue — root cause, proposed change, AND alternative
+// solutions must ALL overlap at or above this threshold. Anything less means at
+// least one section is meaningfully different, so the proposal is treated as new.
+export const DUPLICATE_SIMILARITY_THRESHOLD = 0.98;
 
-// Guard: the issue's existing comment count must fall within [min, max].
-// eslint-disable-next-line @typescript-eslint/require-await
-export async function assertCommentCountInRange(
-  comments: IssueComment[],
-  min: number = MIN_ISSUE_COMMENTS,
-  max: number = MAX_ISSUE_COMMENTS
-): Promise<void> {
-  const count = comments.length;
-  if (count < min || count > max) {
-    throw new GuardViolationError(
-      `Issue has ${count} comment(s); auto-proposal only engages when there are ${min}–${max}`,
-      { count, min, max }
-    );
-  }
+export interface ProposalParts {
+  rootCause: string;
+  proposedChange: string;
+  alternatives: string;
 }
 
-// Guard: the new proposal must differ meaningfully from existing proposals
-// already posted on the issue (by anyone), based on root-cause text overlap.
+// Guard: the new proposal must not be a near-duplicate of a proposal already
+// posted on the issue (by anyone). It is rejected only when its root cause,
+// proposed change, and alternative solutions are ALL ≥98% similar to the
+// corresponding sections of a single existing proposal. If any one section
+// differs meaningfully, the proposal is considered distinct and allowed.
 // Kept async for a uniform Promise<void> guard interface even though the body is sync.
 // eslint-disable-next-line @typescript-eslint/require-await
 export async function assertProposalIsDifferent(
   comments: IssueComment[],
-  newRootCause: string
+  newProposal: ProposalParts
 ): Promise<void> {
-  const existingRootCauses = comments
-    .map((c) => extractRootCause(c.body ?? ''))
-    .filter((rc): rc is string => !!rc);
+  for (const comment of comments) {
+    const existing = extractProposalParts(comment.body ?? '');
+    // Only compare against comments that actually contain a proposal.
+    if (!existing.rootCause) continue;
 
-  for (const existingRootCause of existingRootCauses) {
-    const similarity = jaccardSimilarity(newRootCause, existingRootCause);
-    if (similarity >= 0.6) {
+    const rootCauseSim = sectionSimilarity(newProposal.rootCause, existing.rootCause);
+    const proposedChangeSim = sectionSimilarity(newProposal.proposedChange, existing.proposedChange);
+    const alternativesSim = sectionSimilarity(newProposal.alternatives, existing.alternatives);
+
+    if (
+      rootCauseSim >= DUPLICATE_SIMILARITY_THRESHOLD &&
+      proposedChangeSim >= DUPLICATE_SIMILARITY_THRESHOLD &&
+      alternativesSim >= DUPLICATE_SIMILARITY_THRESHOLD
+    ) {
       throw new GuardViolationError(
-        "Your proposal's root cause is too similar to an existing proposal already posted on this issue",
-        { similarity, existingRootCause }
+        'Your proposal is a near-duplicate of an existing proposal on this issue — its root cause, proposed change, and alternative solutions are all ≥98% identical',
+        { rootCauseSim, proposedChangeSim, alternativesSim }
       );
     }
   }
@@ -141,11 +141,37 @@ export async function listIssueComments(
   return res.data;
 }
 
-function extractRootCause(commentBody: string): string | null {
-  const match = commentBody.match(
-    /###\s*What is the root cause[^\n]*\n+([\s\S]*?)(\n###|\n##|$)/i
+function extractSection(commentBody: string, headerRegex: RegExp): string {
+  const match = commentBody.match(headerRegex);
+  return (match?.[1] ?? '').trim();
+}
+
+// Pulls the three proposal sections out of a GitHub comment body, matching the
+// section headers of the Expensify proposal template that the generator emits.
+function extractProposalParts(commentBody: string): ProposalParts {
+  const rootCause = extractSection(
+    commentBody,
+    /###\s*What is the root cause[^?\n]*\?\s*\n([\s\S]*?)(?=\n### |\n\*\*Reminder:|<!--|$)/i
   );
-  return match?.[1]?.trim() ?? null;
+  const proposedChange = extractSection(
+    commentBody,
+    /###\s*What changes[^?\n]*\?\s*\n(?:<!--[^\n]*-->\s*\n)?([\s\S]*?)(?=\n### |\n\*\*Reminder:|<!--|$)/i
+  );
+  const alternatives = extractSection(
+    commentBody,
+    /###\s*What alternative[^?\n]*\?\s*(?:\(Optional\))?\s*\n([\s\S]*?)(?=\n### |\n\*\*Reminder:|<!--|$)/i
+  );
+  return { rootCause, proposedChange, alternatives };
+}
+
+// Similarity of two proposal sections. Two absent sections count as identical
+// (both empty → 1); one present and one absent count as completely different (0).
+function sectionSimilarity(a: string, b: string): number {
+  const aEmpty = a.trim() === '';
+  const bEmpty = b.trim() === '';
+  if (aEmpty && bEmpty) return 1;
+  if (aEmpty || bEmpty) return 0;
+  return jaccardSimilarity(a, b);
 }
 
 function jaccardSimilarity(a: string, b: string): number {

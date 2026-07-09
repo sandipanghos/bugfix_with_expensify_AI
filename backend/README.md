@@ -1,6 +1,6 @@
 # GitHub Issue Notifier — Backend
 
-Monitors a GitHub repository for new issues matching a configured label and sends email notifications instantly. Also sends update emails when a watched issue is edited or reopened.
+Monitors a GitHub repository for new issues matching a configured label and sends email notifications instantly. Also sends update emails when a watched issue changes — but only for issues that already have a proposal comment.
 
 **No webhooks. No Redis. No job queues.** Runs on SQLite + SMTP only.
 
@@ -8,16 +8,18 @@ Monitors a GitHub repository for new issues matching a configured label and send
 
 ## How It Works
 
-Two background schedulers run continuously:
+A single background poller runs continuously:
 
 ```
-GitHub Events API (every 60s, ETag-cached)
-  → new issue with watched label?  → create NotificationRecord (PENDING)
-  → edited/reopened watched issue? → set hasPendingUpdate = true
+GitHub Issues REST API — full snapshot every 5s (sorted by created date, newest first)
+  → new issue with watched label, created today?  → create NotificationRecord (PENDING)
+  → changed watched issue (title/body/comments)?  → set hasPendingUpdate = true
+  → open issue no longer in results?              → soft-delete (closed/unlabeled)
 
-Email Sender (every 20s)
-  → PENDING records  → sendMail → SENT  (retry every 20s on failure)
-  → hasPendingUpdate → sendMail update email → updateEmailCount++
+Email Sender
+  → PENDING records          → sendMail → SENT  (retry on failure)
+  → hasPendingUpdate records → sendMail update email → updateEmailCount++
+    (skipped unless the issue already has a proposal comment)
 ```
 
 ---
@@ -135,9 +137,9 @@ All notifier settings (repo, label, email, limit, GitHub token) are managed at r
 | `issueLimit` | `4` | Max new issues selected per day |
 | `githubToken` | `null` | Optional PAT (5000 req/hr vs 60) |
 | `isRunning` | `false` | Master on/off switch |
-| `pollIntervalSeconds` | `60` | Updated from GitHub `X-Poll-Interval` header |
-| `dailySelectedCount` | `0` | New issues selected today (resets at midnight) |
-| `lastEtag` | `null` | ETag for 304 optimization |
+| `pollIntervalSeconds` | `60` | Legacy — the poller now runs on a fixed 5s interval |
+| `dailySelectedCount` | `0` | New issues selected today (resets at date change) |
+| `lastEtag` | `null` | Legacy column — no longer used (poller does not use ETags) |
 
 ### NotificationRecord (one per issue)
 
@@ -182,7 +184,7 @@ backend/
 │   │   ├── notifications.routes.ts   # CRUD for notification records
 │   │   └── health.routes.ts          # /health, /health/ready
 │   ├── services/
-│   │   ├── events-poller.service.ts  # GitHub Events API + ETag logic
+│   │   ├── issue-poller.service.ts   # 5s full-snapshot Issues REST API scan
 │   │   ├── notification-sender.service.ts  # Drain PENDING queue + send emails
 │   │   └── email.service.ts          # Nodemailer wrapper (initial + update)
 │   ├── jobs/
@@ -223,7 +225,7 @@ Lines      : 95.09%
 ```
 
 138 tests — all passing in ~5.6s.
-
+root 
 ---
 
 ## Deployment (Fly.io)

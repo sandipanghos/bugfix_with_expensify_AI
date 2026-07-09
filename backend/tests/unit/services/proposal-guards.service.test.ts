@@ -1,88 +1,91 @@
 import { describe, it, expect } from 'vitest';
 import {
-  assertCommentCountInRange,
   assertProposalIsDifferent,
   GuardViolationError,
-  MIN_ISSUE_COMMENTS,
-  MAX_ISSUE_COMMENTS,
   type IssueComment,
+  type ProposalParts,
 } from '../../../src/services/proposal-guards.service.js';
 
-function makeComments(n: number): IssueComment[] {
-  return Array.from({ length: n }, (_, i) => ({
-    body: `comment ${i}`,
-    user: { login: `user${i}` },
-    html_url: `https://github.com/o/r/issues/1#c${i}`,
-  }));
-}
-
-describe('assertCommentCountInRange', () => {
-  it('accepts issues from 0 to 4 comments (inclusive bounds)', async () => {
-    for (let n = MIN_ISSUE_COMMENTS; n <= MAX_ISSUE_COMMENTS; n++) {
-      await expect(assertCommentCountInRange(makeComments(n))).resolves.toBeUndefined();
-    }
-  });
-
-  it('accepts issues with zero comments', async () => {
-    await expect(assertCommentCountInRange(makeComments(0))).resolves.toBeUndefined();
-  });
-
-  it('rejects issues with more than 4 comments', async () => {
-    await expect(assertCommentCountInRange(makeComments(5))).rejects.toBeInstanceOf(
-      GuardViolationError
-    );
-  });
-
-  it('reports the actual count and bounds in the violation details', async () => {
-    try {
-      await assertCommentCountInRange(makeComments(7));
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(GuardViolationError);
-      expect((err as GuardViolationError).details).toEqual({
-        count: 7,
-        min: MIN_ISSUE_COMMENTS,
-        max: MAX_ISSUE_COMMENTS,
-      });
-    }
-  });
-
-  it('honours explicit custom bounds', async () => {
-    await expect(assertCommentCountInRange(makeComments(6), 5, 10)).resolves.toBeUndefined();
-    await expect(assertCommentCountInRange(makeComments(2), 5, 10)).rejects.toBeInstanceOf(
-      GuardViolationError
-    );
-  });
-});
-
-describe('assertProposalIsDifferent', () => {
-  const rootCauseSection = (text: string): IssueComment => ({
-    body: `## Proposal\n### What is the root cause of that problem?\n${text}\n### What changes do you think we should make`,
+// Builds a proposal comment body (as it would appear on GitHub) from its three sections.
+function proposalComment(parts: ProposalParts): IssueComment {
+  return {
+    body: [
+      '## Proposal',
+      '### What is the root cause of that problem?',
+      parts.rootCause,
+      '### What changes do you think we should make in order to solve the problem?',
+      parts.proposedChange,
+      '### What alternative solutions did you explore? (Optional)',
+      parts.alternatives,
+      '**Reminder:** ...',
+    ].join('\n'),
     user: { login: 'someone' },
     html_url: 'https://github.com/o/r/issues/1#c',
-  });
+  };
+}
 
-  it('blocks a near-duplicate root cause', async () => {
-    const existing = rootCauseSection(
-      'The submit button handler never debounces clicks so the request fires twice'
-    );
+const baseProposal: ProposalParts = {
+  rootCause: 'The submit button handler never debounces clicks so the request fires twice rapidly',
+  proposedChange: 'Wrap the submit handler in a debounce and disable the button while the request is inflight',
+  alternatives: 'Considered a server-side idempotency key but that requires a backend change',
+};
+
+describe('assertProposalIsDifferent', () => {
+  it('blocks a proposal whose root cause, proposed change, and alternatives are all near-identical', async () => {
+    const existing = proposalComment(baseProposal);
     await expect(
-      assertProposalIsDifferent(
-        [existing],
-        'The submit button handler never debounces clicks so the request fires twice rapidly'
-      )
+      assertProposalIsDifferent([existing], { ...baseProposal })
     ).rejects.toBeInstanceOf(GuardViolationError);
   });
 
-  it('allows a clearly different root cause', async () => {
-    const existing = rootCauseSection(
-      'The submit button handler never debounces clicks so the request fires twice'
-    );
+  it('allows a proposal when only the root cause matches but the fix and alternatives differ', async () => {
+    const existing = proposalComment(baseProposal);
     await expect(
-      assertProposalIsDifferent(
-        [existing],
-        'Pagination offset is computed from the wrong page index causing skipped records'
-      )
+      assertProposalIsDifferent([existing], {
+        rootCause: baseProposal.rootCause,
+        proposedChange: 'Move the mutation into a sequential queue and dedupe by request id on the client',
+        alternatives: 'Explored throttling at the network layer and a UI-level pending spinner instead',
+      })
     ).resolves.toBeUndefined();
+  });
+
+  it('allows a proposal that shares the fix but has a different root cause', async () => {
+    const existing = proposalComment(baseProposal);
+    await expect(
+      assertProposalIsDifferent([existing], {
+        rootCause: 'Pagination offset is computed from the wrong page index causing skipped records',
+        proposedChange: baseProposal.proposedChange,
+        alternatives: baseProposal.alternatives,
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it('ignores comments that are not proposals', async () => {
+    const chatter: IssueComment = {
+      body: 'I can reproduce this on iOS as well, happy to help test.',
+      user: { login: 'passerby' },
+      html_url: 'https://github.com/o/r/issues/1#c2',
+    };
+    await expect(
+      assertProposalIsDifferent([chatter], { ...baseProposal })
+    ).resolves.toBeUndefined();
+  });
+
+  it('reports per-section similarity in the violation details', async () => {
+    const existing = proposalComment(baseProposal);
+    try {
+      await assertProposalIsDifferent([existing], { ...baseProposal });
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(GuardViolationError);
+      const details = (err as GuardViolationError).details as {
+        rootCauseSim: number;
+        proposedChangeSim: number;
+        alternativesSim: number;
+      };
+      expect(details.rootCauseSim).toBeGreaterThanOrEqual(0.98);
+      expect(details.proposedChangeSim).toBeGreaterThanOrEqual(0.98);
+      expect(details.alternativesSim).toBeGreaterThanOrEqual(0.98);
+    }
   });
 });
