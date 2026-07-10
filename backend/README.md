@@ -3,7 +3,7 @@
 Monitors a GitHub repository for new issues matching a configured label and sends email notifications instantly. Also sends update emails when a watched issue changes — but only for issues that already have a proposal comment.
 
 **No webhooks. No Redis. No job queues.** Runs on SQLite + SMTP only.
-
+test
 ---
 
 ## How It Works
