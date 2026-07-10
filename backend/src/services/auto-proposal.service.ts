@@ -91,11 +91,42 @@ export class AutoProposalService {
     });
     if (toPropose.length === 0) return;
 
+    // Daily cap: never post more than issueLimit proposals per calendar day (UTC).
+    // Without this, a backlog of tracked-but-unproposed issues flushes as a burst of
+    // comments on the watched repo (e.g. 31 at once). We derive today's count from the
+    // proposalRecord table (the source of truth) rather than a separate counter, so it
+    // stays correct across restarts and can't drift. Remaining candidates are deferred
+    // to subsequent days and drained issueLimit-at-a-time.
+    const startOfDayUtc = new Date(`${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`);
+    const postedToday = await prisma.proposalRecord.count({
+      where: {
+        createdAt: { gte: startOfDayUtc },
+        repoFullName: config.watchedRepo,
+        contributorUsername: config.myGithubUsername,
+      },
+    });
+    const remaining = config.issueLimit - postedToday;
+    if (remaining <= 0) {
+      logger.info(
+        { postedToday, issueLimit: config.issueLimit },
+        'Auto-proposal daily limit reached — skipping until UTC reset'
+      );
+      return;
+    }
+
+    const capped = toPropose.slice(0, remaining);
+    if (capped.length < toPropose.length) {
+      logger.info(
+        { posting: capped.length, deferred: toPropose.length - capped.length, postedToday, issueLimit: config.issueLimit },
+        'Auto-proposal daily cap applied — deferring remaining candidates to a later day'
+      );
+    }
+
     const octokit = new Octokit({ auth: config.githubToken ?? env.GITHUB_TOKEN });
 
-    // Each issue is fully independent — process all in parallel
+    // Each issue is fully independent — process all in parallel (bounded by the daily cap above)
     await Promise.allSettled(
-      toPropose.map(async (record) => {
+      capped.map(async (record) => {
         try {
           const issueStart = Date.now();
           // Use pre-fetched data from the fast poller cache to skip a GitHub API call.
