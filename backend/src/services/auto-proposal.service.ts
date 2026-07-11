@@ -59,11 +59,14 @@ export class AutoProposalService {
     const [pendingRecords, updateRecords] = await Promise.all([
       prisma.notificationRecord.findMany({
         where: { status: 'PENDING', deletedAt: null },
-        orderBy: { createdAt: 'asc' },
+        // Newest issue first, so fresh issues win the daily proposal slots before an
+        // older backlog does (matters now that proposals are capped per day).
+        orderBy: { createdAt: 'desc' },
       }),
       prisma.notificationRecord.findMany({
         where: { status: 'SENT', hasPendingUpdate: true, deletedAt: null },
-        orderBy: { updatedAt: 'asc' },
+        // Most recently updated first.
+        orderBy: { updatedAt: 'desc' },
       }),
     ]);
 
