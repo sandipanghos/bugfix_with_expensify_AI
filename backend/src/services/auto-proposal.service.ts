@@ -2,7 +2,7 @@ import { Octokit } from '@octokit/rest';
 import { prisma } from '../db/client.js';
 import { env } from '../utils/env.js';
 import { logger } from '../utils/logger.js';
-import { generateProposal } from './proposal-generator.service.js';
+import { generateProposal, type GeneratedProposal } from './proposal-generator.service.js';
 import {
   assertNoExistingProposal,
   assertProposalIsDifferent,
@@ -12,6 +12,33 @@ import {
 import { issueDataCache } from './issue-poller.service.js';
 
 const CACHE_TTL_MS = 2 * 60 * 1000;
+
+// Phase-1 placeholder posted the instant a new issue is detected, before the slow
+// LLM analysis begins. It's edited in place with the full proposal once generation
+// finishes (Phase 2). It starts with "## Proposal" so that if the process dies
+// mid-flight, a later poll's assertNoExistingProposal detects our own claim and
+// won't double-post. The user-visible line signals the analysis is in progress.
+const CLAIM_PLACEHOLDER_BODY =
+  '## Proposal\n\n_Reviewing the code and preparing a detailed root-cause analysis — this comment will be updated with the full proposal shortly._';
+
+// Best-effort deletion of a comment; never throws (used on cleanup paths where a
+// failure to delete must not mask the original error).
+async function deleteCommentSafe(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  commentId: number
+): Promise<void> {
+  try {
+    await octokit.request('DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}', {
+      owner,
+      repo,
+      comment_id: commentId,
+    });
+  } catch (err) {
+    logger.warn({ err, commentId }, 'Auto-proposal: failed to remove placeholder claim comment');
+  }
+}
 
 export class AutoProposalService {
   private static isRunning = false;
@@ -178,38 +205,74 @@ export class AutoProposalService {
             throw err;
           }
 
-          const generated = await generateProposal({
-            repoFullName: config.watchedRepo,
-            issueNumber: record.githubIssueNumber,
-            issueTitle,
-            issueBody,
-            issueComments: comments.map((c) => c.body ?? '').filter(Boolean),
-            issueUrl: record.url,
-            octokit,
-          });
-
+          // ── Phase 1: claim the slot NOW ────────────────────────────────────
+          // Post a lightweight placeholder before the slow LLM analysis so we land
+          // near the top of the thread instead of behind contributors who post
+          // while we're still generating. We fetched `comments` above (before this
+          // post), so the difference guard below never sees our own placeholder.
+          let claimCommentId: number;
           try {
+            const claimRes = await octokit.request(
+              'POST /repos/{owner}/{repo}/issues/{issue_number}/comments',
+              {
+                owner,
+                repo,
+                issue_number: record.githubIssueNumber,
+                body: CLAIM_PLACEHOLDER_BODY,
+              }
+            );
+            claimCommentId = claimRes.data.id;
+          } catch (err) {
+            logger.error(err, `Auto-proposal: failed to post claim comment for #${record.githubIssueNumber}`);
+            return;
+          }
+          const claimedAt = Date.now();
+
+          // ── Phase 2: deep analysis, then edit the claim into the full proposal ─
+          let generated: GeneratedProposal;
+          try {
+            generated = await generateProposal({
+              repoFullName: config.watchedRepo,
+              issueNumber: record.githubIssueNumber,
+              issueTitle,
+              issueBody,
+              issueComments: comments.map((c) => c.body ?? '').filter(Boolean),
+              issueUrl: record.url,
+              octokit,
+            });
             await assertProposalIsDifferent(comments, generated);
           } catch (err) {
+            // Generation failed or the proposal is a near-duplicate — withdraw the
+            // placeholder so we don't leave a hollow claim on the issue.
+            await deleteCommentSafe(octokit, owner, repo, claimCommentId);
             if (err instanceof GuardViolationError) {
               logger.info(
                 { issueNumber: record.githubIssueNumber, reason: err.message },
-                'Auto-proposal near-duplicate — skipping'
+                'Auto-proposal near-duplicate — claim withdrawn'
               );
               return;
             }
             throw err;
           }
 
-          const postRes = await octokit.request(
-            'POST /repos/{owner}/{repo}/issues/{issue_number}/comments',
-            {
-              owner,
-              repo,
-              issue_number: record.githubIssueNumber,
-              body: generated.commentBody,
-            }
-          );
+          let editRes;
+          try {
+            editRes = await octokit.request(
+              'PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}',
+              {
+                owner,
+                repo,
+                comment_id: claimCommentId,
+                body: generated.commentBody,
+              }
+            );
+          } catch (err) {
+            // The edit failed, so the placeholder is still hollow. Remove it so a
+            // later poll can retry cleanly — otherwise the leftover "## Proposal"
+            // claim would trip assertNoExistingProposal and block this issue forever.
+            await deleteCommentSafe(octokit, owner, repo, claimCommentId);
+            throw err;
+          }
 
           await prisma.proposalRecord.create({
             data: {
@@ -220,14 +283,20 @@ export class AutoProposalService {
               proposedChange: generated.proposedChange,
               alternatives: generated.alternatives,
               commentBody: generated.commentBody,
-              commentUrl: postRes.data.html_url,
-              commentId: BigInt(postRes.data.id),
+              commentUrl: editRes.data.html_url,
+              commentId: BigInt(editRes.data.id),
             },
           });
 
           logger.info(
-            { issueNumber: record.githubIssueNumber, commentUrl: postRes.data.html_url, durationMs: Date.now() - issueStart },
-            'Auto-proposal posted'
+            {
+              issueNumber: record.githubIssueNumber,
+              commentUrl: editRes.data.html_url,
+              claimMs: claimedAt - issueStart,
+              generateMs: Date.now() - claimedAt,
+              durationMs: Date.now() - issueStart,
+            },
+            'Auto-proposal posted (two-phase claim + edit)'
           );
         } catch (err) {
           logger.error(err, `Auto-proposal failed for issue #${record.githubIssueNumber}`);

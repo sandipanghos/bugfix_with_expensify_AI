@@ -49,9 +49,12 @@ When analysing a GitHub issue:
 
 // Maximum tool-call rounds before forcing a final answer.
 // Repo tree is injected into the prompt and source dirs are pre-warmed, so most
-// proposals finish in a few rounds; 25 gives deep-exploration headroom for complex
-// issues while still capping runaway loops.
-const MAX_TOOL_ROUNDS = 25;
+// proposals finish in a few rounds. Capped at 6 to keep time-to-post low in the
+// "Help Wanted" race — a shallower-but-solid analysis posted fast beats a deeper
+// one posted after a competitor has already claimed the issue. On the rare complex
+// issue that hits the cap, the loop still forces a final no-tools completion from
+// everything read so far (see below), so we never post an empty proposal.
+const MAX_TOOL_ROUNDS = 6;
 // Files larger than this are skipped to avoid blowing the context window.
 const MAX_FILE_BYTES = 200_000;
 
