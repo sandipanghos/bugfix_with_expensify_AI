@@ -101,6 +101,32 @@ export async function assertProposalIsDifferent(
   }
 }
 
+// Returns true if any OTHER contributor's proposal on the issue is a near-duplicate
+// (≥98% identical across all three sections) of our own posted proposal. Comments
+// authored by `ourUsername` are skipped so we never match our proposal against itself.
+// Used at update-email time to suppress notifications on issues where our proposal has
+// been made redundant by an essentially identical proposal from someone else.
+export function proposalHasNearDuplicate(
+  comments: IssueComment[],
+  ourProposal: ProposalParts,
+  ourUsername: string
+): boolean {
+  for (const comment of comments) {
+    if ((comment.user?.login ?? '').toLowerCase() === ourUsername.toLowerCase()) continue;
+    const other = extractProposalParts(comment.body ?? '');
+    if (!other.rootCause) continue; // comment isn't a proposal
+
+    if (
+      sectionSimilarity(ourProposal.rootCause, other.rootCause) >= DUPLICATE_SIMILARITY_THRESHOLD &&
+      sectionSimilarity(ourProposal.proposedChange, other.proposedChange) >= DUPLICATE_SIMILARITY_THRESHOLD &&
+      sectionSimilarity(ourProposal.alternatives, other.alternatives) >= DUPLICATE_SIMILARITY_THRESHOLD
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Guard: contributor must not already have an open issue/PR assigned to them
 // (anywhere on GitHub) waiting on their action before taking on a new one.
 export async function assertNoAssignedWorkPending(

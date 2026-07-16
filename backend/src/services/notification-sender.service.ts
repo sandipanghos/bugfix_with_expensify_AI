@@ -1,7 +1,9 @@
+import { Octokit } from '@octokit/rest';
 import { prisma } from '../db/client.js';
 import { logger } from '../utils/logger.js';
 import { sendIssueNotification } from './email.service.js';
 import { isWithinNotifyWindow } from '../api/config.routes.js';
+import { listIssueComments, proposalHasNearDuplicate } from './proposal-guards.service.js';
 
 export class NotificationSenderService {
   // Prevents two concurrent send() calls from running the same batch in parallel,
@@ -43,7 +45,8 @@ export class NotificationSenderService {
         orderBy: { createdAt: 'asc' },
       }),
       prisma.notificationRecord.findMany({
-        where: { status: 'SENT', hasPendingUpdate: true, deletedAt: null },
+        // Skip issues whose proposal was flagged a near-duplicate — no update emails.
+        where: { status: 'SENT', hasPendingUpdate: true, deletedAt: null, proposalDuplicate: false },
         orderBy: { updatedAt: 'asc' },
       }),
     ]);
@@ -111,6 +114,46 @@ export class NotificationSenderService {
               'Update notification skipped — no proposal comment posted for this issue'
             );
             return;
+          }
+
+          // Suppress the update email if our posted proposal is now a near-duplicate
+          // (≥98% identical) of another contributor's proposal on the issue. Persist
+          // proposalDuplicate so future updates skip the GitHub round-trip entirely.
+          if (config.githubToken && config.myGithubUsername) {
+            const [dupOwner, dupRepo] = record.repoFullName.split('/');
+            if (dupOwner && dupRepo) {
+              try {
+                const octokit = new Octokit({ auth: config.githubToken });
+                const comments = await listIssueComments(octokit, dupOwner, dupRepo, record.githubIssueNumber);
+                const isDup = proposalHasNearDuplicate(
+                  comments,
+                  {
+                    rootCause: hasProposal.rootCause,
+                    proposedChange: hasProposal.proposedChange,
+                    alternatives: hasProposal.alternatives,
+                  },
+                  config.myGithubUsername
+                );
+                if (isDup) {
+                  await prisma.notificationRecord.update({
+                    where: { id: record.id },
+                    data: { hasPendingUpdate: false, proposalDuplicate: true },
+                  });
+                  logger.info(
+                    { issueNumber: record.githubIssueNumber },
+                    'Update notification skipped — proposal is a near-duplicate of another on the issue'
+                  );
+                  return;
+                }
+              } catch (dupErr) {
+                // Non-fatal: if the duplicate check fails (e.g. GitHub rate limit),
+                // fall through and send the email rather than silently dropping it.
+                logger.warn(
+                  { err: dupErr, issueNumber: record.githubIssueNumber },
+                  'Duplicate check failed before update email — sending anyway'
+                );
+              }
+            }
           }
 
           const smtpStart = Date.now();

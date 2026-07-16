@@ -45,6 +45,10 @@ model NotificationRecord {
   hasPendingUpdate  Boolean     @default(false)
   updateEmailCount  Int         @default(0)
   lastUpdateEmailAt DateTime?
+  // Set when the auto-proposal for this issue was blocked as a near-duplicate
+  // (≥98% identical to an existing proposal). Such issues are dropped from the
+  // update-email queue and are not re-attempted by the auto-proposer.
+  proposalDuplicate Boolean     @default(false)
   labelDetectedAt   DateTime?
   deletedAt         DateTime?
   createdAt         DateTime    @default(now())

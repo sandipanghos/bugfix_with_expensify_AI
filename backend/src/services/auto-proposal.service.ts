@@ -85,13 +85,15 @@ export class AutoProposalService {
     // attempt failed, or the issue was first seen outside the daily limit window).
     const [pendingRecords, updateRecords] = await Promise.all([
       prisma.notificationRecord.findMany({
-        where: { status: 'PENDING', deletedAt: null },
+        // proposalDuplicate issues are excluded — their proposal was already blocked
+        // as a near-duplicate, so re-generating would just waste an LLM call.
+        where: { status: 'PENDING', deletedAt: null, proposalDuplicate: false },
         // Newest issue first, so fresh issues win the daily proposal slots before an
         // older backlog does (matters now that proposals are capped per day).
         orderBy: { createdAt: 'desc' },
       }),
       prisma.notificationRecord.findMany({
-        where: { status: 'SENT', hasPendingUpdate: true, deletedAt: null },
+        where: { status: 'SENT', hasPendingUpdate: true, deletedAt: null, proposalDuplicate: false },
         // Most recently updated first.
         orderBy: { updatedAt: 'desc' },
       }),
@@ -246,9 +248,17 @@ export class AutoProposalService {
             // placeholder so we don't leave a hollow claim on the issue.
             await deleteCommentSafe(octokit, owner, repo, claimCommentId);
             if (err instanceof GuardViolationError) {
+              // A GuardViolationError here can only come from assertProposalIsDifferent
+              // (generateProposal never throws it), so this issue's proposal duplicates
+              // one already on the thread. Flag it so we stop emailing updates about it
+              // and stop re-running the (expensive) generation on every future update.
+              await prisma.notificationRecord.update({
+                where: { id: record.id },
+                data: { proposalDuplicate: true, hasPendingUpdate: false },
+              });
               logger.info(
                 { issueNumber: record.githubIssueNumber, reason: err.message },
-                'Auto-proposal near-duplicate — claim withdrawn'
+                'Auto-proposal near-duplicate — claim withdrawn, issue flagged (update emails + retries suppressed)'
               );
               return;
             }
